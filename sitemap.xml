@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://monarch-initiative.github.io/talisman/</loc>
+         <lastmod>2024-01-04</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://monarch-initiative.github.io/talisman/evaluations/</loc>
+         <lastmod>2024-01-04</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://monarch-initiative.github.io/talisman/functions/</loc>
+         <lastmod>2024-01-04</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://monarch-initiative.github.io/talisman/operation/</loc>
+         <lastmod>2024-01-04</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://monarch-initiative.github.io/talisman/setup/</loc>
+         <lastmod>2024-01-04</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+    <url>
+         <loc>https://monarch-initiative.github.io/talisman/troubleshooting/</loc>
+         <lastmod>2024-01-04</lastmod>
+         <changefreq>daily</changefreq>
+    </url>
+</urlset>
