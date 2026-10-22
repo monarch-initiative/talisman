@@ -614,7 +614,8 @@ def amigo3_benchmark(
         max_terms=max_terms,
         **options,
     )
-    output.write(dump_minimal_yaml(report))
+    # Not dump_minimal_yaml: it drops zero scores and empty lists.
+    output.write(yaml.safe_dump(report, sort_keys=False, allow_unicode=True))
 
 
 @main.command()

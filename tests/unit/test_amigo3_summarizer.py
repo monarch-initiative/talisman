@@ -21,6 +21,7 @@ STUDY = {
     "unresolved": ["NOTAGENE"],
     "ambiguous": [],
     "duplicates": [],
+    "outside_background": ["UniProtKB:P06733"],
 }
 
 
@@ -87,8 +88,12 @@ class FakeAmigo3(Amigo3Client):
 
 
 class FakeClaude(ClaudeCodeClient):
+    last = None
+    """The client that made the latest call (agent mode calls a configured copy)."""
+
     def complete(self, prompt, system_prompt, json_schema):
         self.prompt, self.system_prompt = prompt, system_prompt
+        FakeClaude.last = self
         return {
             "structured_output": {
                 "summary": "Glycolysis.",
@@ -104,6 +109,7 @@ class FakeClaude(ClaudeCodeClient):
                 ],
                 "enriched_terms": [{"id": "GO:0006096", "label": "glycolytic process"}],
                 "caveats": ["NOTAGENE was not found."],
+                "checks": [{"question": "Evidence for HK1?", "finding": "IDA"}],
             },
             "model": "claude-sonnet-5-5",
             "cost_usd": 0.01,
@@ -158,7 +164,7 @@ class TestSummarize(unittest.TestCase):
         result = self.summarize()
         self.assertEqual(["go", "mgsa"], result.methods)
         self.assertIn("gocam", result.skipped_methods)
-        self.assertIn("gocam was not run", self.claude.prompt)
+        self.assertIn("gocam was not run", FakeClaude.last.prompt)
 
     def test_prompt_contents(self):
         result = self.summarize()
@@ -166,7 +172,11 @@ class TestSummarize(unittest.TestCase):
         self.assertNotIn("GO:0008152", result.prompt)
         self.assertIn("so not tested: NOTAGENE", result.prompt)
         self.assertEqual(["NOTAGENE"], result.unresolved_genes)
-        self.assertNotIn("read-only SQL", self.claude.system_prompt)
+        self.assertEqual(["ENO1"], result.untested_genes)
+        self.assertIn("so not tested there: ENO1", result.prompt)
+        self.assertNotIn("read-only SQL", FakeClaude.last.system_prompt)
+        self.assertNotIn("- checks:", result.prompt)
+        self.assertIsNone(FakeClaude.last.mcp_config)
 
     def test_agent_mode(self):
         with tempfile.TemporaryDirectory() as amigo3_dir:
@@ -175,11 +185,17 @@ class TestSummarize(unittest.TestCase):
             (build / "integration.duckdb").touch()
             with mock.patch("talisman.engines.amigo3_summarizer.shutil.which", return_value="uv"):
                 result = self.summarize(amigo3_dir=amigo3_dir)
-        server = self.claude.mcp_config["mcpServers"]["amigo3"]
+        agent = FakeClaude.last
+        server = agent.mcp_config["mcpServers"]["amigo3"]
         self.assertTrue(result.agent)
         self.assertEqual(str(build.resolve()), server["args"][server["args"].index("--build") + 1])
-        self.assertIn("mcp__amigo3__query_sql", self.claude.allowed_tools)
-        self.assertIn("read-only SQL", self.claude.system_prompt)
+        self.assertEqual(
+            ["mcp__amigo3__database_schema", "mcp__amigo3__query_sql"], agent.allowed_tools
+        )
+        self.assertIn("read-only SQL", agent.system_prompt)
+        self.assertIn("- checks:", result.prompt)
+        self.assertEqual("IDA", result.checks[0].finding)
+        self.assertIsNone(self.claude.mcp_config, "the caller's client is not modified")
 
     def test_agent_mode_needs_the_server_build(self):
         with tempfile.TemporaryDirectory() as amigo3_dir:

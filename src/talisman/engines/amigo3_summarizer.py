@@ -12,6 +12,7 @@ Algorithm:
 
 import logging
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -48,14 +49,17 @@ SYSTEM_PROMPT = (
     "a statement goes beyond them, and cite no identifier for it."
 )
 AGENT_PROMPT = (
-    " You can also query the AmiGO 3 build that produced these results with read-only SQL "
-    "tools: database_schema, query_sql and build_manifest. Inspect the schema before writing "
-    "SQL. Use a few targeted queries (about ten at most) to check claims you are unsure of, "
-    "such as which study genes carry a term and with what evidence, which genes and activities "
-    "a GO-CAM model contains, or what an AI gene review says about a gene. Do not re-run the "
-    "enrichment. Cite only identifiers from the result tables in themes and enriched_terms."
+    " You can also query the AmiGO 3 build that produced these results with two read-only SQL "
+    "tools, database_schema and query_sql. Before you write, use them to check the evidence "
+    "behind each theme you report: for example, which study genes carry the cited GO terms and "
+    "with which evidence codes (experimental or only electronic), which genes and activities a "
+    "cited GO-CAM model contains, or what AI gene reviews say about key genes. Inspect the "
+    "schema first, aggregate in SQL, and keep to about ten queries. Record what you checked and "
+    "found in checks, and let it shape the themes and caveats. Do not re-run the enrichment. "
+    "Cite only identifiers from the result tables in themes and enriched_terms."
 )
-AMIGO3_TOOLS = ["database_schema", "query_sql", "build_manifest"]
+AMIGO3_TOOLS = ["database_schema", "query_sql"]
+"""amigo3's build_manifest tool is left out: it returns megabytes of provenance."""
 
 SUMMARY_SCHEMA = {
     "type": "object",
@@ -85,6 +89,14 @@ SUMMARY_SCHEMA = {
             },
         },
         "caveats": {"type": "array", "items": {"type": "string"}},
+        "checks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"question": {"type": "string"}, "finding": {"type": "string"}},
+                "required": ["question", "finding"],
+            },
+        },
     },
     "required": ["summary", "mechanism", "themes", "enriched_terms", "caveats"],
 }
@@ -103,6 +115,11 @@ class EnrichedTerm(BaseModel):
     label: str = ""
 
 
+class Check(BaseModel):
+    question: str
+    finding: str
+
+
 class Amigo3Summary(BaseModel):
     """A Claude summary of a gene set and the AmiGO 3 results it rests on."""
 
@@ -116,6 +133,11 @@ class Amigo3Summary(BaseModel):
     skipped_methods: Dict[str, str] = {}
     input_genes: int = 0
     unresolved_genes: List[str] = []
+    """Inputs amigo3 could not resolve to one gene of the species."""
+
+    untested_genes: List[str] = []
+    """Resolved genes outside the GO-term background (no qualifying annotation)."""
+
     summary: str = ""
     mechanism: str = ""
     themes: List[Theme] = []
@@ -130,6 +152,9 @@ class Amigo3Summary(BaseModel):
     """Theme genes that are not in the input list."""
 
     caveats: List[str] = []
+    checks: List[Check] = []
+    """What the model verified in the database (agent mode only)."""
+
     enrichment: Dict[str, List[Dict]] = {}
     """The rows each method contributed to the prompt."""
 
@@ -257,6 +282,8 @@ def summarize_with_amigo3(
     symbols = {m["input"]: m["symbol"] or m["id"] for m in study.get("matched", [])}
     unresolved = list(study.get("unresolved", []))
     unresolved += [a["input"] for a in study.get("ambiguous", [])]
+    by_id = {m["id"]: m["symbol"] or m["id"] for m in study.get("matched", [])}
+    untested = [by_id.get(g, g) for g in study.get("outside_background", [])]
     descriptions = {}
     if gene_descriptions and gene_set.genes:
         for gene_id, gene in gene_set.genes.items():
@@ -274,14 +301,19 @@ def summarize_with_amigo3(
         genes=genes,
         with_descriptions=bool(descriptions),
         unresolved=unresolved,
+        untested=untested,
         build_id=build_id,
         methods=tables,
         skipped=skipped,
+        agent=bool(amigo3_dir),
     )
     system_prompt = SYSTEM_PROMPT
     if amigo3_dir:
-        claude.mcp_config = amigo3_mcp_config(amigo3_dir, build_id)
-        claude.allowed_tools = [f"mcp__amigo3__{tool}" for tool in AMIGO3_TOOLS]
+        claude = replace(
+            claude,
+            mcp_config=amigo3_mcp_config(amigo3_dir, build_id),
+            allowed_tools=[f"mcp__amigo3__{tool}" for tool in AMIGO3_TOOLS],
+        )
         system_prompt += AGENT_PROMPT
     reply = claude.complete(prompt, system_prompt, SUMMARY_SCHEMA)
     out = reply["structured_output"]
@@ -302,6 +334,7 @@ def summarize_with_amigo3(
         skipped_methods=skipped,
         input_genes=len(inputs),
         unresolved_genes=unresolved,
+        untested_genes=untested,
         summary=out.get("summary", ""),
         mechanism=out.get("mechanism", ""),
         themes=themes,
@@ -310,6 +343,7 @@ def summarize_with_amigo3(
         ungrounded_ids=list(dict.fromkeys(i for i in cited if i not in shown)),
         unknown_genes=list(dict.fromkeys(g for g in theme_genes if g.upper() not in known_genes)),
         caveats=out.get("caveats", []),
+        checks=[Check(**c) for c in out.get("checks", [])],
         enrichment={t["key"]: t["rows"] for t in tables},
         prompt=prompt,
         cost_usd=reply.get("cost_usd"),
