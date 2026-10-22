@@ -50,6 +50,53 @@ The response text will include, among other fields, a summary like this:
 Summary: The common function among these genes is their involvement in the regulation and organization of the extracellular matrix, particularly collagen fibril organization and biosynthesis.
 ```
 
+### Summarize AmiGO 3 enrichment results with Claude
+
+`talisman amigo3-summarize` grounds the summary in statistics. It runs a gene set through
+the enrichment methods of [AmiGO 3](https://github.com/geneontology/amigo3-prototype):
+
+| method | tests the genes against | significant when |
+|---|---|---|
+| `go` | GO terms, hypergeometric over-representation | FDR (BH) <= 0.05 |
+| `mgsa` | GO terms, Bayesian model-based gene set analysis | posterior >= 0.5 |
+| `gocam` | genes of each GO-CAM model | FDR (BH) <= 0.05 |
+| `neighborhood` | connected neighborhoods of the GO-CAM gene network | FDR (BY) <= 0.05 |
+| `network` | GO-term connectivity in the GO-CAM gene network | FDR (BY) <= 0.05 |
+
+Claude then reads each method's significant sets and writes a summary, a mechanism and
+themes that cite their IDs. Every cited ID is checked against those tables (`ungrounded_ids`)
+and every cited gene against the input (`unknown_genes`). With `--agent`, Claude can also
+query the AmiGO 3 database read-only while it writes, through the same tools as AmiGO 3's chat.
+
+Requirements:
+
+* A running AmiGO 3 server. Build one with `uv run amigo3 fetch` and
+  `uv run amigo3 build --repository /path/to/ai-gene-review`, then
+  `uv run amigo3 serve --backend duckdb` (no Solr needed). Without `--repository`, only
+  `go` and `mgsa` work; the others are reported in `skipped_methods`.
+* [Claude Code](https://claude.com/claude-code), signed in. TALISMAN runs `claude -p`, so calls
+  are billed to that sign-in; set `CLAUDE_CONFIG_DIR` to choose between accounts. No API key
+  is needed.
+
+```bash
+talisman amigo3-summarize -U tests/input/genesets/HALLMARK_GLYCOLYSIS.yaml -o glycolysis.yaml
+talisman amigo3-summarize --agent --amigo3-dir ../amigo3-prototype -m opus HK1 PFKM PKM ENO1
+```
+
+Useful options: `--methods` (default `go,mgsa,gocam,neighborhood`), `--aspect P|F|C`,
+`--evidence all|no_iea|experimental|iba`, `--species` (an AmiGO 3 species key; default the
+gene set's taxon), `--gene-descriptions` (also give Claude the gene descriptions from the
+`enrichment` command), `--max-budget-usd` and `--show-prompt`.
+
+Replies are cached in `.talisman_claude_cache.db` in the current directory (or the
+`talisman --cache-db` path), keyed by model, prompt and tools; pass `--no-cache` for a fresh
+answer.
+
+`talisman amigo3-benchmark` runs AmiGO 3's bundled example gene sets, each with curated
+expected GO terms, and reports how many expected terms the significant `go` and `mgsa`
+results and Claude's cited terms each recover. It runs one set by default; pass `--limit 0`
+for all of them.
+
 ## Citation
 
 The gene summarization approach used in TALISMAN is described further in: Joachimiak MP, Caufield JH, Harris NL, Kim H, Mungall CJ. Gene Set Summarization using Large Language Models. arXiv publication: <http://arxiv.org/abs/2305.13338>

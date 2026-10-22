@@ -1,0 +1,29 @@
+Gene set: {{ name }}
+Species: {{ species }}
+{% if description %}Description: {{ description }}
+{% endif %}Input genes ({{ genes|length }}):{% if with_descriptions %}
+{% for g in genes %}- {{ g.symbol }}{% if g.description %}: {{ g.description }}{% endif %}
+{% endfor %}{% else %} {{ genes|map(attribute="symbol")|join(", ") }}
+{% endif %}{% if unresolved %}Not found in AmiGO 3 for this species, so not tested: {{ unresolved|join(", ") }}
+{% endif %}
+Enrichment results from AmiGO 3, build {{ build_id }}:
+{% for m in methods %}
+## {{ m.key }}: {{ m.title }}
+Test: {{ m.test }}. Sets: {{ m.sets }}. Background: {{ m.background }}. {{ m.study }} study genes in a background of {{ m.population }}; {{ m.tests }} sets tested.
+{% if m.rows %}{% if not m.n_significant %}No set reached {{ m.threshold }}. The top {{ m.rows|length }} are listed for context only and are not evidence of enrichment.
+{% elif m.n_significant > m.rows|length %}{{ m.n_significant }} sets reached {{ m.threshold }}; the top {{ m.rows|length }} are listed.
+{% else %}{{ m.n_significant }} sets reached {{ m.threshold }}.
+{% endif %}
+| ID | Label | Study genes / set size | {{ m.stat_label }} | Study genes |
+|---|---|---|---|---|
+{% for r in m.rows %}| {{ r.id }} | {{ r.label }} | {{ r.study_count }}/{{ r.term_size }} | {{ r.stat }} | {{ r.genes }} |
+{% endfor %}{% else %}No set contained study genes.
+{% endif %}{% endfor %}{% if skipped %}
+{% for key, reason in skipped.items() %}{{ key }} was not run: {{ reason }}
+{% endfor %}{% endif %}
+Write your interpretation as JSON with these fields:
+- summary: 2 to 4 sentences on what the gene set as a whole is about.
+- mechanism: a short hypothesis connecting the main themes, if the results support one; otherwise say they do not.
+- themes: 1 to 6 groups of related results. For each, give the IDs from the tables above that support it, the method keys ({{ methods|map(attribute="key")|join(", ") }}) whose tables they come from, and its key genes from the input list.
+- enriched_terms: up to 15 of the most informative IDs from the tables, most specific and best supported first, each with its label.
+- caveats: what a reader should keep in mind, such as untested genes, methods that found nothing, or themes resting on few genes.
