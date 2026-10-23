@@ -1,0 +1,387 @@
+"""Summarize a gene set with Claude, grounded in AmiGO 3 enrichment results.
+
+Algorithm:
+
+1. Run the chosen AmiGO 3 enrichment methods on the gene list.
+2. Put each method's significant sets (or its top sets, marked as not significant)
+   in a prompt, optionally with TALISMAN's gene descriptions.
+3. Ask Claude for a summary, mechanism and themes that cite IDs from those tables.
+   In agent mode Claude can also query the AmiGO 3 build read-only while it writes.
+4. Check every cited ID against the tables and every cited gene against the input.
+"""
+
+import logging
+import shutil
+from dataclasses import replace
+from pathlib import Path
+from typing import Dict, List, Optional
+
+from jinja2 import Template
+from pydantic import BaseModel
+
+from talisman.amigo3_client import Amigo3Client, run_methods
+from talisman.claude_code import ClaudeCodeClient
+from talisman.prompts.amigo3 import DEFAULT_AMIGO3_PROMPT
+from talisman.utils.gene_set_utils import GeneSet
+
+logger = logging.getLogger(__name__)
+
+# Per method: the statistic that decides significance, its threshold and its label.
+STATISTICS = {
+    "go": ("fdr", 0.05, "FDR (BH)"),
+    "mgsa": ("posterior", 0.5, "MGSA posterior"),
+    "gocam": ("fdr", 0.05, "FDR (BH)"),
+    "neighborhood": ("by_fdr", 0.05, "FDR (BY)"),
+    "network": ("by_fdr", 0.05, "FDR (BY)"),
+}
+HIGHER_IS_BETTER = {"posterior"}
+GENES_FIELD = {"neighborhood": "overlap_genes"}
+"""Which gene list a row shows: study genes in the set, except for network
+connectivity, where "genes" holds the study genes connected to the set."""
+MAX_RESULTS = 5000
+"""amigo3's maximum; its default of 500 would undercount significant sets."""
+GO_TERM_METHODS = ("go", "mgsa")
+CONTEXT_ROWS = 5
+"""Rows shown for a method with no significant set."""
+
+SYSTEM_PROMPT = (
+    "You interpret gene set enrichment results for biologists. You are given a gene set and the "
+    "results of statistical enrichment analyses that AmiGO 3 ran on it against the Gene Ontology "
+    "(GO) and GO-CAM pathway models. Ground your interpretation in these results: cite their "
+    "identifiers exactly as written and never invent identifiers. Where methods agree, say so; "
+    "where they differ, say why that may be (for example, MGSA explains away ancestors and "
+    "overlapping terms that the hypergeometric test lists separately). Prefer specific terms to "
+    "general ones. You may use wider biological knowledge to connect the results, but say when "
+    "a statement goes beyond them, and cite no identifier for it."
+)
+AGENT_PROMPT = (
+    " You can also query the AmiGO 3 build that produced these results with two read-only SQL "
+    "tools, database_schema and query_sql. Before you write, use them to check the evidence "
+    "behind each theme you report: for example, which study genes carry the cited GO terms and "
+    "with which evidence codes (experimental or only electronic), which genes and activities a "
+    "cited GO-CAM model contains, or what AI gene reviews say about key genes. Inspect the "
+    "schema first, aggregate in SQL, and keep to about ten queries. Record what you checked and "
+    "found in checks, and let it shape the themes and caveats. Do not re-run the enrichment. "
+    "Cite only identifiers from the result tables in themes and enriched_terms."
+)
+AMIGO3_TOOLS = ["database_schema", "query_sql"]
+"""amigo3's build_manifest tool is left out: it returns megabytes of provenance."""
+
+SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "mechanism": {"type": "string"},
+        "themes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "term_ids": {"type": "array", "items": {"type": "string"}},
+                    "methods": {"type": "array", "items": {"type": "string"}},
+                    "genes": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["name", "description", "term_ids", "methods", "genes"],
+            },
+        },
+        "enriched_terms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"id": {"type": "string"}, "label": {"type": "string"}},
+                "required": ["id", "label"],
+            },
+        },
+        "caveats": {"type": "array", "items": {"type": "string"}},
+        "checks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"question": {"type": "string"}, "finding": {"type": "string"}},
+                "required": ["question", "finding"],
+            },
+        },
+    },
+    "required": ["summary", "mechanism", "themes", "enriched_terms", "caveats"],
+}
+
+
+class Theme(BaseModel):
+    name: str
+    description: str
+    term_ids: List[str] = []
+    methods: List[str] = []
+    genes: List[str] = []
+
+
+class EnrichedTerm(BaseModel):
+    id: str
+    label: str = ""
+
+
+class Check(BaseModel):
+    question: str
+    finding: str
+
+
+class Amigo3Summary(BaseModel):
+    """A Claude summary of a gene set and the AmiGO 3 results it rests on."""
+
+    name: str
+    species: str
+    model: str = ""
+    agent: bool = False
+    amigo3_url: str = ""
+    build_id: Optional[str] = None
+    methods: List[str] = []
+    skipped_methods: Dict[str, str] = {}
+    input_genes: int = 0
+    unresolved_genes: List[str] = []
+    """Inputs amigo3 could not find in the species."""
+
+    ambiguous_genes: List[str] = []
+    """Inputs that matched several genes, so amigo3 left them out."""
+
+    untested_genes: List[str] = []
+    """Resolved genes outside the GO-term background (no qualifying annotation)."""
+
+    summary: str = ""
+    mechanism: str = ""
+    themes: List[Theme] = []
+    enriched_terms: List[EnrichedTerm] = []
+    term_ids: List[str] = []
+    """IDs of enriched_terms, in order (the field TALISMAN's evaluations read)."""
+
+    ungrounded_ids: List[str] = []
+    """Cited IDs that were not in any result table given to the model."""
+
+    nonsignificant_ids: List[str] = []
+    """Cited IDs that were only in a table as non-significant context rows."""
+
+    unknown_genes: List[str] = []
+    """Theme genes that are not in the input list."""
+
+    caveats: List[str] = []
+    checks: List[Check] = []
+    """What the model verified in the database (agent mode only)."""
+
+    enrichment: Dict[str, List[Dict]] = {}
+    """The rows each method contributed to the prompt."""
+
+    significant_ids: Dict[str, List[str]] = {}
+    """Every significant set of each method, best first, shown to the model or not."""
+
+    prompt: str = ""
+    cost_usd: Optional[float] = None
+    num_turns: Optional[int] = None
+    cached: bool = False
+
+
+def _stat_text(statistic: str, value: Optional[float]) -> str:
+    if value is None:
+        return ""
+    return f"{value:.2f}" if statistic == "posterior" else f"{value:.2g}"
+
+
+def _gene_list(genes: List[Dict], max_genes: int) -> str:
+    symbols = [g.get("symbol") or g["id"] for g in genes]
+    if len(symbols) > max_genes:
+        return ", ".join(symbols[:max_genes]) + f" (+{len(symbols) - max_genes} more)"
+    return ", ".join(symbols)
+
+
+def _label(method: str, term: Dict) -> str:
+    label = term.get("label") or term["id"]
+    if method == "neighborhood":
+        hubs = ", ".join(g["symbol"] for g in term.get("representatives", []))
+        context = "; ".join(c["label"] for c in term.get("go_context", []))
+        label += f" (hubs: {hubs}" + (f"; GO context: {context}" if context else "") + ")"
+    elif term.get("status") and term["status"] != "production":
+        label += f" ({term['status']})"
+    return label.replace("|", "/")
+
+
+def select_rows(method: str, result: Dict, max_terms: int = 25, max_genes: int = 20) -> Dict:
+    """Pick the rows of one method's result that go into the prompt."""
+    statistic, threshold, stat_label = STATISTICS[method]
+    terms = [t for t in result.get("terms", []) if t.get(statistic) is not None]
+    if statistic in HIGHER_IS_BETTER:
+        terms.sort(key=lambda t: -t[statistic])
+        significant = [t for t in terms if t[statistic] >= threshold]
+        threshold_text = f"{stat_label} >= {threshold}"
+    else:
+        significant = [t for t in terms if t[statistic] <= threshold]
+        threshold_text = f"{stat_label} <= {threshold}"
+    shown = significant[:max_terms] if significant else terms[:CONTEXT_ROWS]
+    significant_ids = [t["id"] for t in significant]
+    rows = []
+    for term in shown:
+        genes = term.get(GENES_FIELD.get(method, "genes")) or []
+        rows.append(
+            {
+                "id": term["id"],
+                "label": _label(method, term),
+                "study_count": term.get("study_count"),
+                "term_size": term.get("term_size"),
+                "stat": _stat_text(statistic, term[statistic]),
+                "genes": _gene_list(genes, max_genes),
+                "significant": term["id"] in significant_ids,
+            }
+        )
+    parameters, counts = result.get("parameters", {}), result.get("counts", {})
+    return {
+        "key": method,
+        "title": f"{parameters.get('method_label', method)}, {parameters.get('target_label', '')}",
+        "test": parameters.get("test", ""),
+        "sets": parameters.get("sets", ""),
+        "background": parameters.get("background", ""),
+        "study": counts.get("study"),
+        "population": counts.get("population"),
+        "tests": counts.get("tests"),
+        "threshold": threshold_text,
+        "stat_label": stat_label,
+        "genes_label": (
+            "Study genes connected to the set" if method == "network" else "Study genes"
+        ),
+        "n_significant": len(significant),
+        # amigo3 returned only its top results, all significant: the count is a floor.
+        "at_least": bool(result.get("truncated")) and len(significant) == len(terms),
+        "significant_ids": significant_ids,
+        "rows": rows,
+    }
+
+
+def _study(results: Dict[str, Dict]) -> Dict:
+    """Gene resolution as amigo3 reported it, preferring a GO-term method."""
+    for method in (*GO_TERM_METHODS, "gocam", "neighborhood", "network"):
+        if method in results:
+            return results[method].get("study", {})
+    return {}
+
+
+def amigo3_mcp_config(amigo3_dir: str, build_id: str) -> Dict:
+    """MCP config that serves a build's read-only DuckDB tools from an amigo3 checkout."""
+    build = Path(amigo3_dir).resolve() / "data" / "builds" / build_id
+    if not (build / "integration.duckdb").is_file():
+        raise ValueError(f"No integration.duckdb for build {build_id} under {amigo3_dir}")
+    uv = shutil.which("uv")
+    if not uv:
+        raise ValueError("--agent needs uv to start the amigo3 MCP server")
+    args = ["run", "--project", str(Path(amigo3_dir).resolve()), "--extra", "chat"]
+    args += ["python", "-m", "amigo3.chat_tools", "--build", str(build)]
+    return {"mcpServers": {"amigo3": {"command": uv, "args": args}}}
+
+
+def summarize_with_amigo3(
+    gene_set: GeneSet,
+    species: str,
+    amigo3: Amigo3Client,
+    claude: ClaudeCodeClient,
+    methods: List[str],
+    parameters: Optional[Dict] = None,
+    max_terms: int = 25,
+    max_genes: int = 20,
+    gene_descriptions: bool = False,
+    max_description_length: int = 300,
+    amigo3_dir: Optional[str] = None,
+    prompt_template: Optional[str] = None,
+) -> Amigo3Summary:
+    """Run AmiGO 3 enrichment on a gene set and have Claude summarize the results.
+
+    :param amigo3_dir: an amigo3 checkout; if given, Claude can query the build (agent mode)
+    """
+    inputs = gene_set.gene_ids or gene_set.gene_symbols
+    if not inputs:
+        raise ValueError("Gene set has no gene IDs or symbols")
+    build_id = amigo3.options().get("build_id")
+    parameters = {"max_results": MAX_RESULTS, **(parameters or {})}
+    run = run_methods(amigo3, inputs, species, methods, parameters)
+    results, skipped = run["results"], run["skipped"]
+    if not results:
+        raise ValueError(f"No enrichment method ran: {skipped}")
+    study = _study(results)
+    symbols = {m["input"]: m["symbol"] or m["id"] for m in study.get("matched", [])}
+    unresolved = list(study.get("unresolved", []))
+    ambiguous = [a["input"] for a in study.get("ambiguous", [])]
+    by_id = {m["id"]: m["symbol"] or m["id"] for m in study.get("matched", [])}
+    # outside_background means "no qualifying GO annotation" only for the GO-term methods
+    untested = []
+    if any(m in results for m in GO_TERM_METHODS):
+        untested = [by_id.get(g, g) for g in study.get("outside_background", [])]
+    descriptions = {}
+    if gene_descriptions and gene_set.genes:
+        for gene_id, gene in gene_set.genes.items():
+            text = gene.ontological_synopsis or gene.narrative_synopsis or ""
+            if len(text) > max_description_length:
+                text = text[:max_description_length].rsplit(" ", 1)[0] + "..."
+            descriptions[gene_id] = descriptions[gene.symbol] = text
+    genes = [{"symbol": symbols.get(i, i), "description": descriptions.get(i, "")} for i in inputs]
+    tables = [select_rows(m, results[m], max_terms, max_genes) for m in methods if m in results]
+    template_path = Path(prompt_template) if prompt_template else DEFAULT_AMIGO3_PROMPT
+    prompt = Template(template_path.read_text()).render(
+        name=gene_set.name,
+        species=species,
+        description=gene_set.description,
+        genes=genes,
+        with_descriptions=bool(descriptions),
+        unresolved=unresolved,
+        ambiguous=ambiguous,
+        untested=untested,
+        build_id=build_id,
+        methods=tables,
+        skipped=skipped,
+        agent=bool(amigo3_dir),
+    )
+    system_prompt = SYSTEM_PROMPT
+    if amigo3_dir:
+        claude = replace(
+            claude,
+            mcp_config=amigo3_mcp_config(amigo3_dir, build_id),
+            allowed_tools=[f"mcp__amigo3__{tool}" for tool in AMIGO3_TOOLS],
+        )
+        system_prompt += AGENT_PROMPT
+    reply = claude.complete(prompt, system_prompt, SUMMARY_SCHEMA)
+    if amigo3_dir and (reply.get("num_turns") or 0) <= 2:
+        logger.warning("Agent mode made no database queries; check that the MCP server starts")
+    out = reply["structured_output"]
+    themes = [Theme(**t) for t in out.get("themes", [])]
+    enriched = [EnrichedTerm(**t) for t in out.get("enriched_terms", [])]
+    shown = {r["id"] for table in tables for r in table["rows"]}
+    significant = {r["id"] for table in tables for r in table["rows"] if r["significant"]}
+    cited = [i for t in themes for i in t.term_ids] + [t.id for t in enriched]
+    known_genes = {s.upper() for s in [*inputs, *symbols.values()]}
+    theme_genes = [g for t in themes for g in t.genes]
+    return Amigo3Summary(
+        name=gene_set.name,
+        species=species,
+        model=reply["model"],
+        agent=bool(amigo3_dir),
+        amigo3_url=amigo3.url,
+        build_id=build_id,
+        methods=list(results),
+        skipped_methods=skipped,
+        input_genes=len(inputs),
+        unresolved_genes=unresolved,
+        ambiguous_genes=ambiguous,
+        untested_genes=untested,
+        summary=out.get("summary", ""),
+        mechanism=out.get("mechanism", ""),
+        themes=themes,
+        enriched_terms=enriched,
+        term_ids=[t.id for t in enriched],
+        ungrounded_ids=list(dict.fromkeys(i for i in cited if i not in shown)),
+        nonsignificant_ids=list(
+            dict.fromkeys(i for i in cited if i in shown and i not in significant)
+        ),
+        unknown_genes=list(dict.fromkeys(g for g in theme_genes if g.upper() not in known_genes)),
+        caveats=out.get("caveats", []),
+        checks=[Check(**c) for c in out.get("checks", [])],
+        enrichment={t["key"]: t["rows"] for t in tables},
+        significant_ids={t["key"]: t["significant_ids"] for t in tables},
+        prompt=prompt,
+        cost_usd=reply.get("cost_usd"),
+        num_turns=reply.get("num_turns"),
+        cached=reply.get("cached", False),
+    )

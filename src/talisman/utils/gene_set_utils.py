@@ -264,5 +264,18 @@ def gene_info(id: ENTITY_ID) -> Tuple[SYMBOL, DESCRIPTION, DESCRIPTION]:
     if response.status_code != 200:
         raise ValueError(f"Error fetching issues: {response.status_code} // {response.text}")
     obj = response.json()
+    if "gene" in obj:
+        # Current Alliance API: descriptions are typed notes on the gene record
+        gene = obj["gene"]
+        notes = {
+            note["noteType"]["name"]: note.get("freeText", "")
+            for note in gene.get("relatedNotes", [])
+            if note.get("noteType")
+        }
+        automated = notes.get("automated_gene_description") or notes.get(
+            "MOD_provided_automated_gene_description", ""
+        )
+        narrative = notes.get("MOD_provided_gene_description", "")
+        return gene["geneSymbol"]["displayText"], narrative, automated
     symbol = obj["symbol"]
     return symbol, obj["geneSynopsis"], obj["automatedGeneSynopsis"]

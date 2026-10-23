@@ -24,6 +24,10 @@ from ontogpt.io.rdf_exporter import RDFExporter
 from ontogpt.io.yaml_wrapper import dump_minimal_yaml
 from ontogpt.templates.core import ExtractionResult
 
+from talisman.amigo3_benchmark import run_benchmark
+from talisman.amigo3_client import DEFAULT_AMIGO3_URL, DEFAULT_METHODS, METHODS, Amigo3Client
+from talisman.claude_code import DEFAULT_CACHE_DB, DEFAULT_CLAUDE_MODEL, ClaudeCodeClient
+from talisman.engines.amigo3_summarizer import summarize_with_amigo3
 from talisman.engines.enrichment import EnrichmentEngine
 from talisman.utils.gene_set_utils import (
     GeneSet,
@@ -387,6 +391,239 @@ def enrichment(
     if show_prompt:
         print(results.prompt)
     output.write(dump_minimal_yaml(results))
+
+
+def amigo3_options(f):
+    """Options shared by the AmiGO 3 commands."""
+    options = [
+        click.option(
+            "--amigo3-url",
+            default=DEFAULT_AMIGO3_URL,
+            show_default=True,
+            help="A running AmiGO 3 server (amigo3 serve --backend duckdb).",
+        ),
+        click.option(
+            "--methods",
+            default=",".join(DEFAULT_METHODS),
+            show_default=True,
+            help=f"Comma-separated enrichment methods: {', '.join(METHODS)}.",
+        ),
+        click.option(
+            "--aspect",
+            type=click.Choice(["P", "F", "C"]),
+            default="P",
+            show_default=True,
+            help="GO aspect for the GO-term methods.",
+        ),
+        click.option(
+            "--evidence",
+            type=click.Choice(["all", "no_iea", "experimental", "iba"]),
+            default="all",
+            show_default=True,
+            help="Annotation evidence for the GO-term methods.",
+        ),
+        click.option(
+            "--max-terms",
+            type=int,
+            default=25,
+            show_default=True,
+            help="Most significant sets per method to show the model.",
+        ),
+        click.option(
+            "-m",
+            "--model",
+            default=DEFAULT_CLAUDE_MODEL,
+            show_default=True,
+            help="Claude model alias (sonnet, opus, haiku) or full name.",
+        ),
+        click.option(
+            "--agent/--no-agent",
+            default=False,
+            show_default=True,
+            help="Let Claude query the AmiGO 3 build (read-only SQL) while it writes.",
+        ),
+        click.option(
+            "--amigo3-dir",
+            type=click.Path(exists=True, file_okay=False),
+            help="amigo3-prototype checkout holding the server's build; needed for --agent.",
+        ),
+        click.option(
+            "--max-budget-usd",
+            type=float,
+            help="Stop a Claude call that would spend more than this.",
+        ),
+        click.option(
+            "--claude-command",
+            default="claude",
+            show_default=True,
+            help="Claude Code executable. Set CLAUDE_CONFIG_DIR to choose its account.",
+        ),
+        click.option(
+            "--cache/--no-cache",
+            default=True,
+            show_default=True,
+            help="Reuse Claude replies from the cache (--cache-db, else " + DEFAULT_CACHE_DB + ").",
+        ),
+    ]
+    for option in reversed(options):
+        f = option(f)
+    return f
+
+
+def _amigo3_setup(
+    methods, aspect, evidence, model, agent, amigo3_dir, max_budget_usd, claude_command, cache
+):
+    method_list = [m.strip() for m in methods.split(",") if m.strip()]
+    unknown = [m for m in method_list if m not in METHODS]
+    if unknown:
+        raise click.BadParameter(f"Unknown methods: {', '.join(unknown)}", param_hint="--methods")
+    if agent and not amigo3_dir:
+        raise click.UsageError("--agent needs --amigo3-dir")
+    claude = ClaudeCodeClient(
+        model=model,
+        command=[claude_command],
+        cache_db=(settings.cache_db or DEFAULT_CACHE_DB) if cache else None,
+        max_budget_usd=max_budget_usd,
+    )
+    options = {
+        "parameters": {"aspect": aspect, "evidence": evidence},
+        "amigo3_dir": amigo3_dir if agent else None,
+    }
+    return method_list, claude, options
+
+
+@main.command("amigo3-summarize")
+@output_option_txt
+@amigo3_options
+@click.option(
+    "--input-file",
+    "-U",
+    help="Gene set YAML, as for the enrichment command (if genes are not passed as arguments)",
+)
+@click.option("--species", help="AmiGO 3 species key, e.g. human, pombe, worm (default: taxon)")
+@click.option(
+    "--gene-descriptions/--no-gene-descriptions",
+    default=False,
+    show_default=True,
+    help="Also give the model the gene set's descriptions (fetched if missing).",
+)
+@show_prompt_option
+@prompt_template_option
+@click.argument("genes", nargs=-1)
+def amigo3_summarize(
+    genes,
+    input_file,
+    species,
+    gene_descriptions,
+    amigo3_url,
+    methods,
+    aspect,
+    evidence,
+    max_terms,
+    model,
+    agent,
+    amigo3_dir,
+    max_budget_usd,
+    claude_command,
+    cache,
+    show_prompt,
+    prompt_template,
+    output,
+):
+    """Summarize a gene set with Claude, grounded in AmiGO 3 enrichment results.
+
+    Runs the chosen AmiGO 3 enrichment methods, gives Claude their significant
+    results, and checks every ID it cites against them (ungrounded_ids).
+
+    Usage:
+
+        talisman amigo3-summarize -U tests/input/genesets/HALLMARK_GLYCOLYSIS.yaml -o out.yaml
+    """
+    if bool(genes) == bool(input_file):
+        raise click.UsageError("Pass either genes or --input-file")
+    gene_set = (
+        parse_gene_set(input_file) if input_file else GeneSet(name="TEMP", gene_symbols=genes)
+    )
+    if gene_descriptions:
+        # Fill a copy: filling also maps symbols to HGNC IDs and drops unmatched ones,
+        # which must not change the genes sent to AmiGO 3.
+        described = gene_set.model_copy(deep=True)
+        try:
+            fill_missing_gene_set_values(described)
+            gene_set.genes = described.genes
+        except ValueError as e:
+            logging.warning(f"No gene descriptions: {e}")
+    method_list, claude, options = _amigo3_setup(
+        methods, aspect, evidence, model, agent, amigo3_dir, max_budget_usd, claude_command, cache
+    )
+    result = summarize_with_amigo3(
+        gene_set,
+        species or gene_set.taxon,
+        Amigo3Client(amigo3_url),
+        claude,
+        method_list,
+        max_terms=max_terms,
+        gene_descriptions=gene_descriptions,
+        prompt_template=prompt_template,
+        **options,
+    )
+    if result.ungrounded_ids:
+        logging.warning(f"Cited IDs not in the enrichment results: {result.ungrounded_ids}")
+    if show_prompt:
+        click.echo(result.prompt, err=True)
+    # Not dump_minimal_yaml: it drops false and empty fields, e.g. an empty ungrounded_ids.
+    output.write(yaml.safe_dump(result.model_dump(), sort_keys=False, allow_unicode=True))
+
+
+@main.command("amigo3-benchmark")
+@output_option_txt
+@amigo3_options
+@click.option("--species", default="human", show_default=True, help="AmiGO 3 species key")
+@click.option(
+    "--limit",
+    type=int,
+    default=1,
+    show_default=True,
+    help="Number of example sets to run; 1 is a canary, 0 runs all. Ignored with --set-id.",
+)
+@click.option("--set-id", multiple=True, help="Only run these example set IDs")
+def amigo3_benchmark(
+    species,
+    limit,
+    set_id,
+    amigo3_url,
+    methods,
+    aspect,
+    evidence,
+    max_terms,
+    model,
+    agent,
+    amigo3_dir,
+    max_budget_usd,
+    claude_command,
+    cache,
+    output,
+):
+    """Score Claude summaries against AmiGO 3's example sets and their expected GO terms.
+
+    Compares the GO IDs Claude cites with the significant hypergeometric and MGSA
+    terms, as recall of the curated expected terms (exact, or allowing descendants).
+    """
+    method_list, claude, options = _amigo3_setup(
+        methods, aspect, evidence, model, agent, amigo3_dir, max_budget_usd, claude_command, cache
+    )
+    report = run_benchmark(
+        Amigo3Client(amigo3_url),
+        claude,
+        method_list,
+        species=species,
+        limit=limit or None,
+        identifiers=list(set_id) or None,
+        max_terms=max_terms,
+        **options,
+    )
+    # Not dump_minimal_yaml: it drops zero scores and empty lists.
+    output.write(yaml.safe_dump(report, sort_keys=False, allow_unicode=True))
 
 
 @main.command()
