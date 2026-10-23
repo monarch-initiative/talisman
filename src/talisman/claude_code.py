@@ -83,6 +83,8 @@ class ClaudeCodeClient:
                 )
             except FileNotFoundError as e:
                 raise ClaudeCodeError(f"Claude Code CLI not found: {self.command[0]}") from e
+            except subprocess.TimeoutExpired as e:
+                raise ClaudeCodeError(f"claude did not finish within {self.timeout} s") from e
         try:
             data = json.loads(proc.stdout)
         except ValueError:
@@ -90,9 +92,9 @@ class ClaudeCodeClient:
                 f"claude exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()[:2000]}"
             )
         if proc.returncode != 0 or data.get("is_error"):
-            raise ClaudeCodeError(
-                f"claude exited {proc.returncode} ({data.get('subtype')}): {data.get('result')}"
-            )
+            # subtype can read "success" on an API error, so report the error text itself
+            reason = data.get("result") or data.get("subtype") or "no result"
+            raise ClaudeCodeError(f"claude exited {proc.returncode}: {reason}")
         structured = data.get("structured_output")
         if structured is None:
             try:

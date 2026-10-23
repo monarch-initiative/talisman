@@ -35,6 +35,12 @@ STATISTICS = {
     "network": ("by_fdr", 0.05, "FDR (BY)"),
 }
 HIGHER_IS_BETTER = {"posterior"}
+GENES_FIELD = {"neighborhood": "overlap_genes"}
+"""Which gene list a row shows: study genes in the set, except for network
+connectivity, where "genes" holds the study genes connected to the set."""
+MAX_RESULTS = 5000
+"""amigo3's maximum; its default of 500 would undercount significant sets."""
+GO_TERM_METHODS = ("go", "mgsa")
 CONTEXT_ROWS = 5
 """Rows shown for a method with no significant set."""
 
@@ -133,7 +139,10 @@ class Amigo3Summary(BaseModel):
     skipped_methods: Dict[str, str] = {}
     input_genes: int = 0
     unresolved_genes: List[str] = []
-    """Inputs amigo3 could not resolve to one gene of the species."""
+    """Inputs amigo3 could not find in the species."""
+
+    ambiguous_genes: List[str] = []
+    """Inputs that matched several genes, so amigo3 left them out."""
 
     untested_genes: List[str] = []
     """Resolved genes outside the GO-term background (no qualifying annotation)."""
@@ -148,6 +157,9 @@ class Amigo3Summary(BaseModel):
     ungrounded_ids: List[str] = []
     """Cited IDs that were not in any result table given to the model."""
 
+    nonsignificant_ids: List[str] = []
+    """Cited IDs that were only in a table as non-significant context rows."""
+
     unknown_genes: List[str] = []
     """Theme genes that are not in the input list."""
 
@@ -157,6 +169,9 @@ class Amigo3Summary(BaseModel):
 
     enrichment: Dict[str, List[Dict]] = {}
     """The rows each method contributed to the prompt."""
+
+    significant_ids: Dict[str, List[str]] = {}
+    """Every significant set of each method, best first, shown to the model or not."""
 
     prompt: str = ""
     cost_usd: Optional[float] = None
@@ -200,9 +215,10 @@ def select_rows(method: str, result: Dict, max_terms: int = 25, max_genes: int =
         significant = [t for t in terms if t[statistic] <= threshold]
         threshold_text = f"{stat_label} <= {threshold}"
     shown = significant[:max_terms] if significant else terms[:CONTEXT_ROWS]
+    significant_ids = [t["id"] for t in significant]
     rows = []
     for term in shown:
-        genes = term.get("overlap_genes") or term.get("genes") or []
+        genes = term.get(GENES_FIELD.get(method, "genes")) or []
         rows.append(
             {
                 "id": term["id"],
@@ -211,7 +227,7 @@ def select_rows(method: str, result: Dict, max_terms: int = 25, max_genes: int =
                 "term_size": term.get("term_size"),
                 "stat": _stat_text(statistic, term[statistic]),
                 "genes": _gene_list(genes, max_genes),
-                "significant": term in significant,
+                "significant": term["id"] in significant_ids,
             }
         )
     parameters, counts = result.get("parameters", {}), result.get("counts", {})
@@ -226,14 +242,20 @@ def select_rows(method: str, result: Dict, max_terms: int = 25, max_genes: int =
         "tests": counts.get("tests"),
         "threshold": threshold_text,
         "stat_label": stat_label,
+        "genes_label": (
+            "Study genes connected to the set" if method == "network" else "Study genes"
+        ),
         "n_significant": len(significant),
+        # amigo3 returned only its top results, all significant: the count is a floor.
+        "at_least": bool(result.get("truncated")) and len(significant) == len(terms),
+        "significant_ids": significant_ids,
         "rows": rows,
     }
 
 
 def _study(results: Dict[str, Dict]) -> Dict:
     """Gene resolution as amigo3 reported it, preferring a GO-term method."""
-    for method in ("go", "mgsa", "gocam", "neighborhood", "network"):
+    for method in (*GO_TERM_METHODS, "gocam", "neighborhood", "network"):
         if method in results:
             return results[method].get("study", {})
     return {}
@@ -274,6 +296,7 @@ def summarize_with_amigo3(
     if not inputs:
         raise ValueError("Gene set has no gene IDs or symbols")
     build_id = amigo3.options().get("build_id")
+    parameters = {"max_results": MAX_RESULTS, **(parameters or {})}
     run = run_methods(amigo3, inputs, species, methods, parameters)
     results, skipped = run["results"], run["skipped"]
     if not results:
@@ -281,9 +304,12 @@ def summarize_with_amigo3(
     study = _study(results)
     symbols = {m["input"]: m["symbol"] or m["id"] for m in study.get("matched", [])}
     unresolved = list(study.get("unresolved", []))
-    unresolved += [a["input"] for a in study.get("ambiguous", [])]
+    ambiguous = [a["input"] for a in study.get("ambiguous", [])]
     by_id = {m["id"]: m["symbol"] or m["id"] for m in study.get("matched", [])}
-    untested = [by_id.get(g, g) for g in study.get("outside_background", [])]
+    # outside_background means "no qualifying GO annotation" only for the GO-term methods
+    untested = []
+    if any(m in results for m in GO_TERM_METHODS):
+        untested = [by_id.get(g, g) for g in study.get("outside_background", [])]
     descriptions = {}
     if gene_descriptions and gene_set.genes:
         for gene_id, gene in gene_set.genes.items():
@@ -301,6 +327,7 @@ def summarize_with_amigo3(
         genes=genes,
         with_descriptions=bool(descriptions),
         unresolved=unresolved,
+        ambiguous=ambiguous,
         untested=untested,
         build_id=build_id,
         methods=tables,
@@ -316,10 +343,13 @@ def summarize_with_amigo3(
         )
         system_prompt += AGENT_PROMPT
     reply = claude.complete(prompt, system_prompt, SUMMARY_SCHEMA)
+    if amigo3_dir and (reply.get("num_turns") or 0) <= 2:
+        logger.warning("Agent mode made no database queries; check that the MCP server starts")
     out = reply["structured_output"]
     themes = [Theme(**t) for t in out.get("themes", [])]
     enriched = [EnrichedTerm(**t) for t in out.get("enriched_terms", [])]
     shown = {r["id"] for table in tables for r in table["rows"]}
+    significant = {r["id"] for table in tables for r in table["rows"] if r["significant"]}
     cited = [i for t in themes for i in t.term_ids] + [t.id for t in enriched]
     known_genes = {s.upper() for s in [*inputs, *symbols.values()]}
     theme_genes = [g for t in themes for g in t.genes]
@@ -334,6 +364,7 @@ def summarize_with_amigo3(
         skipped_methods=skipped,
         input_genes=len(inputs),
         unresolved_genes=unresolved,
+        ambiguous_genes=ambiguous,
         untested_genes=untested,
         summary=out.get("summary", ""),
         mechanism=out.get("mechanism", ""),
@@ -341,10 +372,14 @@ def summarize_with_amigo3(
         enriched_terms=enriched,
         term_ids=[t.id for t in enriched],
         ungrounded_ids=list(dict.fromkeys(i for i in cited if i not in shown)),
+        nonsignificant_ids=list(
+            dict.fromkeys(i for i in cited if i in shown and i not in significant)
+        ),
         unknown_genes=list(dict.fromkeys(g for g in theme_genes if g.upper() not in known_genes)),
         caveats=out.get("caveats", []),
         checks=[Check(**c) for c in out.get("checks", [])],
         enrichment={t["key"]: t["rows"] for t in tables},
+        significant_ids={t["key"]: t["significant_ids"] for t in tables},
         prompt=prompt,
         cost_usd=reply.get("cost_usd"),
         num_turns=reply.get("num_turns"),

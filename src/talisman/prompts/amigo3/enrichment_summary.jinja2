@@ -5,6 +5,7 @@ Species: {{ species }}
 {% for g in genes %}- {{ g.symbol }}{% if g.description %}: {{ g.description }}{% endif %}
 {% endfor %}{% else %} {{ genes|map(attribute="symbol")|join(", ") }}
 {% endif %}{% if unresolved %}Not found in AmiGO 3 for this species, so not tested: {{ unresolved|join(", ") }}
+{% endif %}{% if ambiguous %}Matched several genes in AmiGO 3, so not tested: {{ ambiguous|join(", ") }}
 {% endif %}{% if untested %}Found but outside the GO-term background (no qualifying annotation), so not tested there: {{ untested|join(", ") }}
 {% endif %}
 Enrichment results from AmiGO 3, build {{ build_id }}:
@@ -12,10 +13,10 @@ Enrichment results from AmiGO 3, build {{ build_id }}:
 ## {{ m.key }}: {{ m.title }}
 Test: {{ m.test }}. Sets: {{ m.sets }}. Background: {{ m.background }}. {{ m.study }} study genes in a background of {{ m.population }}; {{ m.tests }} sets tested.
 {% if m.rows %}{% if not m.n_significant %}No set reached {{ m.threshold }}. The top {{ m.rows|length }} are listed for context only and are not evidence of enrichment.
-{% elif m.n_significant > m.rows|length %}{{ m.n_significant }} sets reached {{ m.threshold }}; the top {{ m.rows|length }} are listed.
+{% elif m.n_significant > m.rows|length %}{% if m.at_least %}At least {% endif %}{{ m.n_significant }} sets reached {{ m.threshold }}; the top {{ m.rows|length }} are listed.
 {% else %}{{ m.n_significant }} sets reached {{ m.threshold }}.
 {% endif %}
-| ID | Label | Study genes / set size | {{ m.stat_label }} | Study genes |
+| ID | Label | Study genes / set size | {{ m.stat_label }} | {{ m.genes_label }} |
 |---|---|---|---|---|
 {% for r in m.rows %}| {{ r.id }} | {{ r.label }} | {{ r.study_count }}/{{ r.term_size }} | {{ r.stat }} | {{ r.genes }} |
 {% endfor %}{% else %}No set contained study genes.

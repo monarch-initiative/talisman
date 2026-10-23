@@ -545,7 +545,14 @@ def amigo3_summarize(
         parse_gene_set(input_file) if input_file else GeneSet(name="TEMP", gene_symbols=genes)
     )
     if gene_descriptions:
-        fill_missing_gene_set_values(gene_set)
+        # Fill a copy: filling also maps symbols to HGNC IDs and drops unmatched ones,
+        # which must not change the genes sent to AmiGO 3.
+        described = gene_set.model_copy(deep=True)
+        try:
+            fill_missing_gene_set_values(described)
+            gene_set.genes = described.genes
+        except ValueError as e:
+            logging.warning(f"No gene descriptions: {e}")
     method_list, claude, options = _amigo3_setup(
         methods, aspect, evidence, model, agent, amigo3_dir, max_budget_usd, claude_command, cache
     )
@@ -563,8 +570,9 @@ def amigo3_summarize(
     if result.ungrounded_ids:
         logging.warning(f"Cited IDs not in the enrichment results: {result.ungrounded_ids}")
     if show_prompt:
-        print(result.prompt)
-    output.write(dump_minimal_yaml(result))
+        click.echo(result.prompt, err=True)
+    # Not dump_minimal_yaml: it drops false and empty fields, e.g. an empty ungrounded_ids.
+    output.write(yaml.safe_dump(result.model_dump(), sort_keys=False, allow_unicode=True))
 
 
 @main.command("amigo3-benchmark")
@@ -576,7 +584,7 @@ def amigo3_summarize(
     type=int,
     default=1,
     show_default=True,
-    help="Number of example sets to run; 1 is a canary, 0 runs all.",
+    help="Number of example sets to run; 1 is a canary, 0 runs all. Ignored with --set-id.",
 )
 @click.option("--set-id", multiple=True, help="Only run these example set IDs")
 def amigo3_benchmark(

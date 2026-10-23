@@ -88,14 +88,27 @@ Useful options: `--methods` (default `go,mgsa,gocam,neighborhood`), `--aspect P|
 gene set's taxon), `--gene-descriptions` (also give Claude the gene descriptions from the
 `enrichment` command), `--max-budget-usd` and `--show-prompt`.
 
-Replies are cached in `.talisman_claude_cache.db` in the current directory (or the
-`talisman --cache-db` path), keyed by model, prompt and tools; pass `--no-cache` for a fresh
-answer.
+Output is YAML. Besides the summary, mechanism, themes and caveats it records the genes
+AmiGO 3 could not use (`unresolved_genes`, `ambiguous_genes`, `untested_genes`), the rows
+each method showed the model (`enrichment`), every significant set (`significant_ids`), and
+two grounding checks: `ungrounded_ids` (cited, but in no table) and `nonsignificant_ids`
+(cited, but only from a row listed as context).
 
-`talisman amigo3-benchmark` runs AmiGO 3's bundled example gene sets, each with curated
-expected GO terms, and reports how many expected terms the significant `go` and `mgsa`
-results and Claude's cited terms each recover. It runs one set by default; pass `--limit 0`
-for all of them.
+Replies are cached in `.talisman_claude_cache.db` in the current directory (or the
+`talisman --cache-db` path), keyed by model name, prompt and tools; pass `--no-cache` for a
+fresh answer. An alias such as `sonnet` keeps its cached replies after it moves to a newer
+model, so pass a full model name when that matters.
+
+`talisman amigo3-benchmark` runs AmiGO 3's bundled example gene sets (11 human sets), each
+with curated expected GO terms, and reports the recall of those terms by:
+
+* `claude`: the GO IDs Claude cites from significant table rows
+* `go_top`: the same number of top hypergeometric GO terms, for a like-for-like comparison
+* `shown`: every significant GO term shown to Claude
+* `go_all` and `mgsa_all`: every significant hypergeometric term (often hundreds) and every
+  MGSA-active term
+
+It runs one set by default; pass `--limit 0` for all of them, or `--set-id` to pick sets.
 
 ## Citation
 

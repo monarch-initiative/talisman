@@ -1,14 +1,15 @@
 """Tests for AmiGO 3 enrichment summaries, with no server and no Claude calls."""
 
 import json
+import subprocess  # noqa: S404
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from talisman.amigo3_benchmark import score
+from talisman.amigo3_benchmark import run_benchmark, score
 from talisman.amigo3_client import Amigo3Client, Amigo3Error
-from talisman.claude_code import ClaudeCodeClient
+from talisman.claude_code import ClaudeCodeClient, ClaudeCodeError
 from talisman.engines.amigo3_summarizer import select_rows, summarize_with_amigo3
 from talisman.utils.gene_set_utils import Gene, GeneSet
 
@@ -77,14 +78,28 @@ RESULTS = {
 
 
 class FakeAmigo3(Amigo3Client):
+    results = RESULTS
+    examples = [
+        {"id": "SET_A", "description": "a", "expected_go": [{"id": "GO:0005975"}]},
+        {"id": "SET_B", "description": "b", "expected_go": [{"id": "GO:0006096"}]},
+    ]
+
     def options(self):
         return {"build_id": "b1"}
 
     def enrich(self, genes, species, method="go", **parameters):
-        self.last_genes = genes
-        if method not in RESULTS:
+        self.last_genes, self.last_parameters = genes, parameters
+        if method not in self.results:
             raise Amigo3Error("This build has no GO-CAM models; rebuild with --repository")
-        return RESULTS[method]
+        return self.results[method]
+
+    def example_genesets(self, species):
+        return self.examples
+
+    def geneset(self, identifier, species):
+        if identifier == "SET_B":
+            raise Amigo3Error("GET /api/genesets/SET_B returned 404: not found")
+        return {"genes": ["HK1", "PKM", "ENO1"], "unmapped": 0}
 
 
 class FakeClaude(ClaudeCodeClient):
@@ -137,6 +152,19 @@ class TestSelectRows(unittest.TestCase):
         self.assertEqual(1, len(table["rows"]))
         self.assertFalse(table["rows"][0]["significant"])
 
+    def test_network_shows_connected_genes(self):
+        term = {**go_term("GO:0090153", "x", 0.01), "study_count": 0, "overlap_genes": []}
+        term["by_fdr"] = 0.01
+        term["genes"] = [{"id": "UniProtKB:P55212", "symbol": "CASP6"}]
+        table = select_rows("network", response("x", [term]))
+        self.assertEqual("CASP6", table["rows"][0]["genes"])
+        self.assertEqual("Study genes connected to the set", table["genes_label"])
+
+    def test_truncated_count_is_a_floor(self):
+        result = {**RESULTS["go"], "terms": RESULTS["go"]["terms"][:2], "truncated": True}
+        self.assertTrue(select_rows("go", result)["at_least"])
+        self.assertFalse(select_rows("go", RESULTS["go"])["at_least"])
+
     def test_gene_list_is_capped(self):
         table = select_rows("go", RESULTS["go"], max_genes=2)
         self.assertEqual("HK1, PKM (+1 more)", table["rows"][0]["genes"])
@@ -159,6 +187,34 @@ class TestSummarize(unittest.TestCase):
         self.assertEqual(["MADEUP1"], result.unknown_genes)
         self.assertEqual(["GO:0006096"], result.term_ids)
         self.assertEqual("claude-sonnet-5-5", result.model)
+
+    def test_all_results_requested(self):
+        self.summarize()
+        self.assertEqual(5000, self.amigo3.last_parameters["max_results"])
+
+    def test_significant_ids_kept_beyond_shown_rows(self):
+        result = self.summarize(max_terms=1)
+        self.assertEqual(["GO:0006096"], [r["id"] for r in result.enrichment["go"]])
+        self.assertEqual(["GO:0006096", "GO:0005975"], result.significant_ids["go"])
+
+    def test_citing_a_context_row(self):
+        self.amigo3.results = {"go": response("x", [go_term("GO:0006096", "glycolysis", 0.3)])}
+        result = summarize_with_amigo3(self.gene_set, "human", self.amigo3, self.claude, ["go"])
+        self.assertEqual(["GO:0006096"], result.nonsignificant_ids)
+        self.assertEqual(["GO:9999999"], result.ungrounded_ids)
+
+    def test_ambiguous_genes(self):
+        study = {**STUDY, "ambiguous": [{"input": "TWIN", "candidates": []}]}
+        self.amigo3.results = {"go": {**RESULTS["go"], "study": study}}
+        result = summarize_with_amigo3(self.gene_set, "human", self.amigo3, self.claude, ["go"])
+        self.assertEqual(["TWIN"], result.ambiguous_genes)
+        self.assertEqual(["NOTAGENE"], result.unresolved_genes)
+        self.assertIn("Matched several genes in AmiGO 3, so not tested: TWIN", result.prompt)
+
+    def test_untested_genes_only_from_go_term_methods(self):
+        self.amigo3.results = {"gocam": RESULTS["go"]}
+        result = summarize_with_amigo3(self.gene_set, "human", self.amigo3, self.claude, ["gocam"])
+        self.assertEqual([], result.untested_genes)
 
     def test_skipped_method_is_recorded(self):
         result = self.summarize()
@@ -259,10 +315,21 @@ class TestClaudeCodeClient(unittest.TestCase):
 
     def test_error_result(self):
         client = ClaudeCodeClient(cache_db=None)
-        error = {**self.REPLY, "is_error": True, "subtype": "error_max_budget_usd"}
-        with self.assertRaises(Exception) as context:
+        error = {**self.REPLY, "is_error": True, "result": "API Error: Can't reach the API"}
+        with self.assertRaises(ClaudeCodeError) as context:
+            self.run_client(client, returncode=1, stdout=json.dumps(error))
+        self.assertIn("Can't reach the API", str(context.exception))
+        error = {**self.REPLY, "is_error": True, "result": "", "subtype": "error_max_budget_usd"}
+        with self.assertRaises(ClaudeCodeError) as context:
             self.run_client(client, returncode=1, stdout=json.dumps(error))
         self.assertIn("error_max_budget_usd", str(context.exception))
+
+    def test_timeout(self):
+        client = ClaudeCodeClient(cache_db=None, timeout=1)
+        expired = subprocess.TimeoutExpired("claude", 1)
+        with mock.patch("talisman.claude_code.subprocess.run", side_effect=expired):
+            with self.assertRaises(ClaudeCodeError):
+                client.complete("prompt", "system", {"type": "object"})
 
 
 class TestAmigo3Client(unittest.TestCase):
@@ -293,3 +360,33 @@ class TestBenchmarkScore(unittest.TestCase):
         self.assertAlmostEqual(1 / 3, result["exact"])
         self.assertAlmostEqual(2 / 3, result["specific"])
         self.assertEqual(["GO:missed"], result["missed"])
+
+
+class TestBenchmark(unittest.TestCase):
+    def run_sets(self, **kwargs):
+        return run_benchmark(
+            FakeAmigo3("http://amigo.test"),
+            FakeClaude(cache_db=None),
+            ["go", "mgsa"],
+            ancestors=lambda term: {term},
+            **kwargs,
+        )
+
+    def test_sources_and_failures(self):
+        report = self.run_sets(limit=0)
+        self.assertEqual(1, report["sets"])
+        self.assertEqual("SET_B", report["failed"][0]["id"])
+        scores = report["results"][0]["scores"]
+        # Claude's ungrounded GO:9999999 is not scored; go_top matches Claude's list length
+        self.assertEqual(1, scores["claude"]["predicted"])
+        self.assertEqual(1, scores["go_top"]["predicted"])
+        self.assertEqual(2, scores["go_all"]["predicted"])
+        self.assertEqual(1.0, scores["go_all"]["exact"])
+        self.assertEqual(0.0, scores["claude"]["exact"])
+
+    def test_set_ids_ignore_limit(self):
+        report = self.run_sets(identifiers=["SET_A", "SET_B"])
+        self.assertEqual(1, report["sets"])
+        self.assertEqual(1, len(report["failed"]))
+        with self.assertRaises(ValueError):
+            self.run_sets(identifiers=["NO_SUCH_SET"])
