@@ -10,6 +10,8 @@ dependencies = [
     # talisman uses ontogpt 0.3.6 internals (clients, MODELS, prompts, the enrichment
     # engine and evaluator), which later releases change: test before relaxing this pin.
     "ontogpt==0.3.6",
+    # eutils, which oaklib imports, needs pkg_resources, which setuptools 82 removed.
+    "setuptools<82",
 ]
 
 [project.scripts]
@@ -34,6 +36,10 @@ build-backend = "hatchling.build"
 # Ship only the package, as Poetry did. By default hatchling packs every file that git
 # doesn't ignore, untracked ones included (local caches, scratch notebooks).
 include = ["/src"]
+
+[tool.uv]
+# The locked semsimian 0.2.11 (via oaklib) has wheels only for CPython 3.9-3.11, and no sdist.
+environments = ["python_version < '3.12'"]
 
 [tool.black]
 line-length = 100
