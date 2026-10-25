@@ -1,4 +1,5 @@
 """Tests the command-line interface."""
+
 import unittest
 
 from click.testing import CliRunner

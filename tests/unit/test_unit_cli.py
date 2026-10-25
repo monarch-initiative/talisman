@@ -1,4 +1,5 @@
 """CLI test."""
+
 import unittest
 from unittest import mock
 
