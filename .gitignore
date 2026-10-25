@@ -131,8 +131,8 @@ dmypy.json
 .pyre/
 
 .idea
-.openai_cache.db
-.talisman_claude_cache.db
+.openai_cache.db*
+.talisman_claude_cache.db*
 .gene_requests_cache*
 
 # specific
