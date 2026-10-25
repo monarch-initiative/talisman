@@ -1,12 +1,13 @@
 """Evaluation Resolver."""
+
 from typing import Optional, Type, Union
 
 from class_resolver import ClassResolver
 
 from talisman.evaluation.ctd.eval_ctd import EvalCTD
 from talisman.evaluation.ctd.eval_ctd_ner import EvalCTDNER
-from talisman.evaluation.maxo.eval_maxo import EvalMAXO
 from talisman.evaluation.evaluation_engine import SPIRESEvaluationEngine
+from talisman.evaluation.maxo.eval_maxo import EvalMAXO
 
 resolver = ClassResolver([EvalCTD, EvalCTDNER, EvalMAXO], base=SPIRESEvaluationEngine)
 

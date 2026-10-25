@@ -21,7 +21,8 @@ uv run talisman --help
 
 `uv sync` creates `.venv` with the versions locked in `uv.lock`, including the dev tools, and
 installs talisman in editable mode. `.python-version` selects Python 3.11: on Apple Silicon the
-locked lxml 5.0.0 has no wheels for Python 3.9 or 3.10. Run the unit tests with
+locked lxml 5.0.0 has no wheels for Python 3.9 or 3.10. The lock supports Python 3.9 to 3.11
+(its semsimian has no wheels for newer versions). Run the unit tests with
 `uv run python -m unittest discover tests.unit`.
 
 ## Functionality
