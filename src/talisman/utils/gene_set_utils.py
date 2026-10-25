@@ -243,7 +243,8 @@ def drop_genes_from_gene_set(gene_set: GeneSet, percent_to_drop: int) -> GeneSet
     if num_to_drop == 0:
         num_to_drop = 1
     logger.info(f"Dropping {num_to_drop} genes from {gene_set.name}")
-    gene_set.genes = dict(sample(gene_set.genes.items(), num_genes - num_to_drop))
+    # sample() needs a sequence: Python 3.11 rejects dict views.
+    gene_set.genes = dict(sample(list(gene_set.genes.items()), num_genes - num_to_drop))
     gene_set.gene_ids = list(gene_set.genes.keys())
     gene_set.gene_symbols = [gene.symbol for gene in gene_set.genes.values()]
     gene_set.number_of_genes_dropped = num_to_drop

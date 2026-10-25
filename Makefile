@@ -1,4 +1,4 @@
-RUN = poetry run
+RUN = uv run
 # NOTE: we are currently pinned to an earlier linkml because pydantic...
 TMPRUN = 
 PACKAGE = ontogpt
