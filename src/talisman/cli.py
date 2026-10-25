@@ -1,4 +1,5 @@
 """Command line interface for TALISMAN."""
+
 import codecs
 import logging
 import pickle
@@ -10,7 +11,6 @@ from typing import List, Optional, Union
 
 import click
 import yaml
-
 from ontogpt import DEFAULT_MODEL, DEFAULT_MODEL_DETAILS, MODELS, __version__
 from ontogpt.engines import create_engine
 from ontogpt.engines.knowledge_engine import KnowledgeEngine
