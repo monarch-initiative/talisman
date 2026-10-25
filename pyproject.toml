@@ -19,6 +19,10 @@ talisman = "talisman.cli:main"
 
 [dependency-groups]
 dev = [
+    # The versions of the one-time reformat (#24), used by the Claude Code format hook and
+    # /ci-check. They need Python 3.10+; CI's own lint step still installs its own (#29).
+    "black==26.10.1; python_version >= '3.10'",
+    "isort==9.0.2; python_version >= '3.10'",
     "jupyter>=1.0.0,<2",
     "mkdocs-mermaid2-plugin>=0.6.0",
     "papermill>=2.4.0,<3",
