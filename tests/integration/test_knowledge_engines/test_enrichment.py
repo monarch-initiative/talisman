@@ -1,4 +1,5 @@
 """Core tests."""
+
 import unittest
 
 from talisman.engines import create_engine

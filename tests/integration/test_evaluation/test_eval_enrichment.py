@@ -1,4 +1,5 @@
 """Core tests."""
+
 import unittest
 from pathlib import Path
 

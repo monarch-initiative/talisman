@@ -1,4 +1,5 @@
 """Command line interface for TALISMAN."""
+
 import codecs
 import logging
 import pickle
@@ -10,10 +11,10 @@ from typing import List, Optional, Union
 
 import click
 import yaml
-
 from ontogpt import DEFAULT_MODEL, DEFAULT_MODEL_DETAILS, MODELS, __version__
 from ontogpt.engines import create_engine
 from ontogpt.engines.knowledge_engine import KnowledgeEngine
+from ontogpt.evaluation.enrichment import eval_enrichment as ontogpt_eval_enrichment
 from ontogpt.evaluation.enrichment.eval_enrichment import EvalEnrichment
 from ontogpt.evaluation.resolver import create_evaluator
 from ontogpt.io.csv_wrapper import output_parser
@@ -32,9 +33,14 @@ from talisman.engines.enrichment import EnrichmentEngine
 from talisman.utils.gene_set_utils import (
     GeneSet,
     _is_human,
+    drop_genes_from_gene_set,
     fill_missing_gene_set_values,
     parse_gene_set,
 )
+
+# ontogpt 0.3.6's evaluator drops genes with its own copy of drop_genes_from_gene_set, which
+# fails on Python 3.11+ (#25), and ontogpt is pinned. Give it talisman's fixed copy.
+ontogpt_eval_enrichment.drop_genes_from_gene_set = drop_genes_from_gene_set
 
 __all__ = [
     "main",

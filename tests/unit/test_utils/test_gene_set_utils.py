@@ -1,4 +1,5 @@
 """Core tests."""
+
 import logging
 import shutil
 import unittest
@@ -6,6 +7,9 @@ from pathlib import Path
 
 from talisman.utils import gene_set_utils
 from talisman.utils.gene_set_utils import (
+    Gene,
+    GeneSet,
+    drop_genes_from_gene_set,
     fill_missing_gene_set_values,
     load_gene_sets,
     parse_gene_set,
@@ -45,3 +49,14 @@ class TestGeneSetUtils(unittest.TestCase):
         self.assertEqual(gene.symbol, "MYC")
         self.assertTrue(gene.ontological_synopsis.startswith("Enables several functions"))
         self.assertTrue(gene.narrative_synopsis.startswith("This gene is a proto-oncogene"))
+
+    def test_drop_genes(self):
+        """Test dropping a percentage of genes."""
+        genes = {f"HGNC:{i}": Gene(id=f"HGNC:{i}", symbol=f"G{i}") for i in range(10)}
+        gene_set = GeneSet(name="test", gene_ids=list(genes), genes=genes)
+        dropped = drop_genes_from_gene_set(gene_set, 30)
+        self.assertEqual(len(dropped.genes), 7)
+        self.assertEqual(dropped.number_of_genes_dropped, 3)
+        self.assertEqual(set(dropped.gene_ids), set(dropped.genes))
+        self.assertLessEqual(set(dropped.genes), set(genes))
+        self.assertEqual(len(gene_set.genes), 10, "the input gene set is unchanged")
