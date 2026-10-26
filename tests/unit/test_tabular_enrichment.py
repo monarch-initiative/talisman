@@ -9,17 +9,18 @@ from unittest import mock
 from click.testing import CliRunner
 from openpyxl import Workbook
 
-from talisman.claude_code import ClaudeCodeClient
 from talisman.cli import main
 from talisman.tabular_enrichment import (
     SHEET,
     bh,
     build_prompt,
+    enrich,
     ground,
     read_annotations,
     run_tabular_enrichment,
     summarize_tabular_enrichment,
     term_tables,
+    to_markdown,
 )
 
 HEADER = [
@@ -36,7 +37,7 @@ HEADER = [
 
 
 def _sample_rows():
-    """Synthetic gene-to-GO rows with a clear positive cluster (GO:0006412 + parent GO:0044267)."""
+    """Synthetic gene-to-GO rows with a positive cluster (GO:0006412 + parent GO:0044267)."""
     rows = []
     # 5 positively correlated significant genes in translation (GO:0006412) and parent (GO:0044267)
     for i in range(1, 6):
@@ -72,12 +73,12 @@ def _sample_rows():
     return rows
 
 
-def _write_xlsx(path: Path) -> None:
+def _write_xlsx(path: Path, rows=None, sheet: str = SHEET, header=None) -> None:
     wb = Workbook()
     ws = wb.active
-    ws.title = SHEET
-    ws.append(HEADER)
-    for r in _sample_rows():
+    ws.title = sheet
+    ws.append(header if header is not None else HEADER)
+    for r in rows if rows is not None else _sample_rows():
         ws.append(r)
     wb.save(path)
 
@@ -85,7 +86,8 @@ def _write_xlsx(path: Path) -> None:
 class TestTabularEnrichment(unittest.TestCase):
     """Tests for talisman.tabular_enrichment and its CLI subcommands."""
 
-    def test_bh_monotonic(self):
+    def test_bh_monotonic_and_empty(self):
+        self.assertEqual(bh([]), [])
         pvals = [0.001, 0.04, 0.03, 0.5]
         adj = bh(pvals)
         self.assertEqual(len(adj), 4)
@@ -101,8 +103,10 @@ class TestTabularEnrichment(unittest.TestCase):
             xlsx_path = tmp_path / "input.xlsx"
             tsv_path = tmp_path / "input.tsv"
             _write_xlsx(xlsx_path)
-            tsv_lines = ["\t".join(HEADER)] + ["\t".join(str(x) for x in r) for r in _sample_rows()]
-            tsv_path.write_text("\n".join(tsv_lines) + "\n", encoding="utf-8")
+            tsv_lines = ["\t".join(HEADER), ""] + [
+                "\t".join(str(x) for x in r) for r in _sample_rows()
+            ]
+            tsv_path.write_text("\n".join(tsv_lines) + "\n\n", encoding="utf-8")
 
             genes_x, terms_x, tg_x = read_annotations(xlsx_path)
             genes_t, terms_t, tg_t = read_annotations(tsv_path)
@@ -123,22 +127,24 @@ class TestTabularEnrichment(unittest.TestCase):
 
             sig, sug = term_tables(outdir, "up")
             by_id = {t["go_id"]: t for t in sig}
-            # In ORA, GO:0006412 and GO:0044267 share the 5 study genes, so only GO:0006412 has "ora"
+            # GO:0006412 and GO:0044267 share the 5 study genes; only GO:0006412 has "ora"
             self.assertIn("ora", by_id["GO:0006412"])
             self.assertNotIn("ora", by_id["GO:0044267"])
             self.assertEqual(sug, [])
 
-            prompt = build_prompt("up", sig, sug, context="Custom context.")
+            prompt = build_prompt("up", sig, sug, context="Custom context.", condition="salinity")
             self.assertIn("Custom context.", prompt)
+            self.assertIn("with salinity", prompt)
             self.assertIn("GO:0006412", prompt)
 
+            sug_sample = [{"go_id": "GO:0006810", "go_ontology": "BP", "go_term": "transport"}]
             reply = {
-                "summary": "Translation rises with temperature (GO:0006412).",
+                "summary": "Translation rises (GO:0006412).",
                 "themes": [
                     {
                         "theme": "Translation induction",
-                        "go_ids": ["GO:0006412"],
-                        "evidence": "5/5 genes, FDR < 0.01",
+                        "go_ids": ["GO:0006412 (translation)"],
+                        "evidence": "5/5 genes, FDR < 0.01; see also GO:0006810",
                         "interpretation": "Ribosomal synthesis increases.",
                     }
                 ],
@@ -151,10 +157,71 @@ class TestTabularEnrichment(unittest.TestCase):
                 ],
                 "caveats": ["Synthetic dataset"],
             }
-            g = ground(reply, sig, sug)
-            self.assertEqual(g["cited_ids"], ["GO:0006412", "GO:9999999"])
+            g = ground(reply, sig, sug_sample)
+            self.assertEqual(g["cited_ids"], ["GO:0006412", "GO:0006810", "GO:9999999"])
             self.assertEqual(g["ungrounded_ids"], ["GO:9999999"])
-            self.assertEqual(g["theme_ids_not_significant"], [])
+            self.assertEqual(g["theme_ids_not_significant"], ["GO:0006810"])
+
+            md = to_markdown(
+                "up",
+                {
+                    "direction": "up",
+                    "model": "claude-sonnet-4-6",
+                    "cost_usd": 0.01,
+                    "cached": False,
+                    "significant_terms": len(sig),
+                    "suggestive_terms": 1,
+                    "grounding": g,
+                    "reply": reply,
+                },
+                condition="salinity",
+            )
+            self.assertIn("with salinity", md)
+
+    def test_validation_and_edge_cases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            empty_tsv = tmp_path / "empty.tsv"
+            empty_tsv.write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Empty annotation table"):
+                read_annotations(empty_tsv)
+
+            bad_col_tsv = tmp_path / "bad_col.tsv"
+            bad_col_tsv.write_text("gene_id\tgo_id\nG1\tGO:0006412\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Missing required column"):
+                read_annotations(bad_col_tsv)
+
+            bad_ont_tsv = tmp_path / "bad_ont.tsv"
+            bad_ont_tsv.write_text(
+                "\t".join(HEADER)
+                + "\n12345\tGO:0006412\tUNKNOWN\ttranslation\tYES\tpos\t0.8\t10.0\tno\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "Unknown GO ontology"):
+                read_annotations(bad_ont_tsv)
+
+            # Numeric gene_id and single-letter ontology alias ("P" -> "BP")
+            alias_xlsx = tmp_path / "alias.xlsx"
+            _write_xlsx(
+                alias_xlsx,
+                rows=[[101, " GO:0006412 ", "P", "translation", "YES", "pos", 0.85, 50.0, "no"]],
+            )
+            genes, terms, tg = read_annotations(alias_xlsx)
+            self.assertIn("101", genes)
+            self.assertEqual(terms["GO:0006412"], ("BP", "translation"))
+            self.assertEqual(tg["GO:0006412"], {"101"})
+
+            with self.assertRaisesRegex(ValueError, "Worksheet 'missing' not found"):
+                read_annotations(alias_xlsx, sheet="missing")
+
+            with self.assertRaisesRegex(ValueError, "direction must be"):
+                enrich(genes, terms, tg, "invalid")
+            with self.assertRaisesRegex(ValueError, "direction must be"):
+                term_tables(tmp_path, "invalid")
+            with self.assertRaisesRegex(ValueError, "direction must be"):
+                build_prompt("invalid", [], [])
+            with self.assertRaisesRegex(ValueError, "direction must be"):
+                summarize_tabular_enrichment(tmp_path, "invalid", mock.MagicMock())
 
     def test_cli_tabular_enrichment_and_summarize(self):
         runner = CliRunner()
@@ -171,21 +238,47 @@ class TestTabularEnrichment(unittest.TestCase):
             self.assertTrue((outdir / "rank_test.tsv").exists())
             self.assertTrue((outdir / "enrichment_summary.json").exists())
 
+            ctx_file = tmp_path / "ctx.txt"
+            ctx_file.write_text("File context", encoding="utf-8")
+            res_both_ctx = runner.invoke(
+                main,
+                [
+                    "tabular-summarize",
+                    str(outdir),
+                    "up",
+                    "--context",
+                    "Inline",
+                    "--context-file",
+                    str(ctx_file),
+                ],
+            )
+            self.assertNotEqual(res_both_ctx.exit_code, 0)
+            self.assertIn("either --context or --context-file", res_both_ctx.output)
+
             res_dry = runner.invoke(
                 main,
-                ["tabular-summarize", str(outdir), "up", "--context", "Test organism", "--dry-run"],
+                [
+                    "tabular-summarize",
+                    str(outdir),
+                    "up",
+                    "--context",
+                    "Test organism",
+                    "--condition",
+                    "salinity",
+                    "--dry-run",
+                ],
             )
             self.assertEqual(res_dry.exit_code, 0, msg=res_dry.output)
             self.assertIn("Test organism", res_dry.output)
+            self.assertIn("with salinity", res_dry.output)
             self.assertIn("GO:0006412", res_dry.output)
 
-            fake_client = mock.MagicMock(spec=ClaudeCodeClient)
-            fake_client.complete.return_value = {
+            fake_reply = {
                 "model": "claude-sonnet-4-6",
                 "cost_usd": 0.05,
                 "cached": False,
                 "structured_output": {
-                    "summary": "Translation genes rise (GO:0006412).",
+                    "summary": "Translation genes change (GO:0006412).",
                     "themes": [
                         {
                             "theme": "Translation",
@@ -198,10 +291,26 @@ class TestTabularEnrichment(unittest.TestCase):
                     "caveats": ["Test caveat."],
                 },
             }
-            out = summarize_tabular_enrichment(outdir, "up", fake_client, context="Test organism")
-            self.assertEqual(out["grounding"]["ungrounded_ids"], [])
-            self.assertEqual(out["grounding"]["theme_ids_not_significant"], [])
-            self.assertTrue((outdir / "summary_up.json").exists())
-            self.assertTrue((outdir / "summary_up.md").exists())
-            saved = json.loads((outdir / "summary_up.json").read_text(encoding="utf-8"))
-            self.assertEqual(saved["grounding"]["cited_ids"], ["GO:0006412"])
+            with mock.patch("talisman.cli.ClaudeCodeClient") as mock_cls:
+                mock_cls.return_value.complete.return_value = fake_reply
+                res_up = runner.invoke(
+                    main,
+                    ["tabular-summarize", str(outdir), "up", "--context-file", str(ctx_file)],
+                )
+                self.assertEqual(res_up.exit_code, 0, msg=res_up.output)
+                parsed_up = json.loads(res_up.output)
+                self.assertEqual(parsed_up["direction"], "up")
+                self.assertEqual(parsed_up["grounding"]["ungrounded_ids"], [])
+
+                res_both = runner.invoke(
+                    main,
+                    ["tabular-summarize", str(outdir), "both", "--context", "Test organism"],
+                )
+                self.assertEqual(res_both.exit_code, 0, msg=res_both.output)
+                parsed_both = json.loads(res_both.output)
+                self.assertIn("up", parsed_both)
+                self.assertIn("down", parsed_both)
+                self.assertTrue((outdir / "summary_up.json").exists())
+                self.assertTrue((outdir / "summary_down.json").exists())
+                self.assertTrue((outdir / "summary_up.md").exists())
+                self.assertTrue((outdir / "summary_down.md").exists())

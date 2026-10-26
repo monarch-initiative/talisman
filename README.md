@@ -137,7 +137,7 @@ It runs one set by default; pass `--limit 0` for all of them, or `--set-id` to p
 
 ### Tabular GO Enrichment and Summarization (`tabular-enrichment` and `tabular-summarize`)
 
-For organisms not in AmiGO 3 or custom correlation/expression workbooks (`.xlsx` or `.tsv` with a `genes incldg GO` table containing `gene_id`, `go_id`, `go_ontology`, `go_term`, `Significant?`, `pos/neg corr`, `r (Pearson)`, `FPKM average (samples)`, and `hypothetical protein?`), TALISMAN provides built-in statistical enrichment and grounded Claude summarization:
+For organisms not in AmiGO 3 or custom correlation/expression workbooks (`.xlsx`, `.tsv`, or `.csv` with a `genes incldg GO` table containing `gene_id`, `go_id`, `go_ontology`, `go_term`, `Significant?`, `pos/neg corr`, `r (Pearson)`, `FPKM average (samples)`, and `hypothetical protein?`), TALISMAN provides built-in statistical enrichment and grounded Claude summarization:
 
 ```bash
 # 1. Run one-sided hypergeometric over-representation and two-sided Mann-Whitney U rank tests
@@ -147,7 +147,7 @@ uv run talisman tabular-enrichment workbook.xlsx results/
 uv run talisman tabular-summarize results/ both --context-file experiment_context.txt
 ```
 
-`tabular-enrichment` writes `enrichment_pos.tsv`, `enrichment_neg.tsv`, `rank_test.tsv`, and `enrichment_summary.json` to `results/` (collapsing redundant significant terms that share identical gene sets to the most specific representative term). `tabular-summarize` writes `summary_up.md`, `summary_up.json`, `summary_down.md`, and `summary_down.json`, auditing every cited GO ID against the tables (`ungrounded_ids` and `theme_ids_not_significant`).
+`tabular-enrichment` writes `enrichment_pos.tsv`, `enrichment_neg.tsv`, `rank_test.tsv`, and `enrichment_summary.json` to `results/` (collapsing redundant significant terms that share identical gene sets to the most specific representative term). `tabular-summarize` writes `summary_up.md`, `summary_up.json`, `summary_down.md`, and `summary_down.json`, auditing every cited GO ID against the tables (`ungrounded_ids` and `theme_ids_not_significant`) and caching Claude replies in `results/.claude_cache.db` (or `--cache-db`). Useful options include `--condition`, `--significant-cutoff`, `--suggestive-cutoff`, `--system-prompt-file`, `--max-budget-usd`, and `--dry-run`.
 
 ## Citation
 

@@ -9,7 +9,7 @@ from unittest import mock
 from click.testing import CliRunner
 from oaklib.interfaces.obograph_interface import OboGraphInterface
 
-from talisman.cli import main
+from talisman.cli import main, settings
 from talisman.engines.enrichment import EnrichmentEngine, EnrichmentPayload
 from talisman.evaluation.enrichment.eval_enrichment import (
     DATABASE_DIR,
@@ -17,7 +17,7 @@ from talisman.evaluation.enrichment.eval_enrichment import (
     EvalEnrichment,
 )
 from talisman.utils.gene_set_utils import Gene, GeneSet
-from tests import OUTPUT_DIR
+from tests import GENE_SETS_DIR, OUTPUT_DIR
 
 CLI_OUTPUT_DIR = OUTPUT_DIR / "cli"
 
@@ -147,9 +147,10 @@ class TestCommandLineInterface(unittest.TestCase):
         self.assertIn("PEX1", result.stdout)
 
     def test_enrichment_cli_output_file_and_skip_annotator(self):
-        """Test that enrichment -o writes to a file and forwards --skip-annotator."""
+        """Test that enrichment -o writes to a file and forwards/resets --skip-annotator."""
         fake_ke = mock.MagicMock(spec=EnrichmentEngine)
         fake_ke.client = mock.MagicMock()
+        fake_ke.skip_annotators = None
         fake_ke.summarize.return_value = EnrichmentPayload(
             summary="peroxisome summary",
             term_strings=["peroxisome"],
@@ -168,7 +169,7 @@ class TestCommandLineInterface(unittest.TestCase):
                     "sqlite:obo:go",
                     "enrichment",
                     "-U",
-                    "tests/input/genesets/EDS.yaml",
+                    str(GENE_SETS_DIR / "EDS.yaml"),
                     "-o",
                     str(out_path),
                 ],
@@ -176,3 +177,17 @@ class TestCommandLineInterface(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertEqual(fake_ke.skip_annotators, ["sqlite:obo:go"])
             self.assertIn("peroxisome summary", out_path.read_text(encoding="utf-8"))
+
+            # Subsequent invocation without --skip-annotator resets settings.skip_annotators
+            result2 = self.runner.invoke(
+                main,
+                [
+                    "enrichment",
+                    "-U",
+                    str(GENE_SETS_DIR / "EDS.yaml"),
+                    "-o",
+                    str(out_path),
+                ],
+            )
+            self.assertEqual(result2.exit_code, 0, msg=result2.output)
+            self.assertIsNone(settings.skip_annotators)

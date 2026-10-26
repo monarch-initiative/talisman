@@ -42,6 +42,8 @@ from talisman.tabular_enrichment import (
     FDR,
     MIN_SIZE,
     SHEET,
+    SIGNIFICANT,
+    SUGGESTIVE,
     build_prompt,
     run_tabular_enrichment,
     summarize_tabular_enrichment,
@@ -233,10 +235,8 @@ def main(verbose: int, quiet: bool, cache_db: str, skip_annotator):
     if quiet:
         logger.setLevel(level=logging.ERROR)
     logger.info(f"Logger {logger.name} set to level {logger.level}")
-    if cache_db:
-        settings.cache_db = cache_db
-    if skip_annotator:
-        settings.skip_annotators = list(skip_annotator)
+    settings.cache_db = cache_db or None
+    settings.skip_annotators = list(skip_annotator) if skip_annotator else None
 
 
 @main.command()
@@ -355,11 +355,7 @@ def enrichment(
 
     Usage:
 
-        ontogpt enrichment -r sqlite:obo:hgnc -U tests/input/genesets/dopamine.yaml
-
-    Usage:
-
-        ontogpt enrichment -r sqlite:obo:hgnc -U tests/input/genesets/dopamine.yaml
+        talisman enrichment -r sqlite:obo:hgnc -U tests/input/genesets/dopamine.yaml
     """
     if model:
         selectmodel = get_model_by_name(model)
@@ -713,6 +709,26 @@ def tabular_enrichment_cmd(
     help="Path to a custom system prompt file.",
 )
 @click.option(
+    "--condition",
+    default="temperature",
+    show_default=True,
+    help="Condition or variable correlated with expression for prompt/markdown headings.",
+)
+@click.option(
+    "--significant-cutoff",
+    type=float,
+    default=SIGNIFICANT,
+    show_default=True,
+    help="FDR threshold for primary significant terms.",
+)
+@click.option(
+    "--suggestive-cutoff",
+    type=float,
+    default=SUGGESTIVE,
+    show_default=True,
+    help="FDR threshold for suggestive terms shown as context.",
+)
+@click.option(
     "--model",
     "-m",
     default=DEFAULT_CLAUDE_MODEL,
@@ -749,6 +765,9 @@ def tabular_summarize_cmd(
     context: Optional[str],
     context_file: Optional[Path],
     system_prompt_file: Optional[Path],
+    condition: str,
+    significant_cutoff: float,
+    suggestive_cutoff: float,
     model: str,
     max_budget_usd: float,
     claude_command: str,
@@ -775,9 +794,24 @@ def tabular_summarize_cmd(
     )
     directions = ("up", "down") if direction == "both" else (direction,)
     if dry_run:
+        prompts = []
         for d in directions:
-            significant, suggestive = term_tables(results_dir, d)
-            click.echo(build_prompt(d, significant, suggestive, context=resolved_context), nl=False)
+            significant, suggestive = term_tables(
+                results_dir,
+                d,
+                significant_cutoff=significant_cutoff,
+                suggestive_cutoff=suggestive_cutoff,
+            )
+            prompts.append(
+                build_prompt(
+                    d,
+                    significant,
+                    suggestive,
+                    context=resolved_context,
+                    condition=condition,
+                )
+            )
+        click.echo("\n".join(prompts), nl=False)
         return
     cache_path = (settings.cache_db or str(results_dir / ".claude_cache.db")) if cache else None
     client = ClaudeCodeClient(
@@ -786,6 +820,7 @@ def tabular_summarize_cmd(
         cache_db=cache_path,
         max_budget_usd=max_budget_usd,
     )
+    summaries = []
     for d in directions:
         out = summarize_tabular_enrichment(
             results_dir,
@@ -793,24 +828,26 @@ def tabular_summarize_cmd(
             client,
             context=resolved_context,
             system_prompt=resolved_system_prompt,
+            condition=condition,
+            significant_cutoff=significant_cutoff,
+            suggestive_cutoff=suggestive_cutoff,
         )
-        click.echo(
-            json.dumps(
-                {
-                    k: out[k]
-                    for k in (
-                        "direction",
-                        "model",
-                        "cost_usd",
-                        "cached",
-                        "significant_terms",
-                        "suggestive_terms",
-                        "grounding",
-                    )
-                },
-                indent=2,
-            )
+        summaries.append(
+            {
+                k: out[k]
+                for k in (
+                    "direction",
+                    "model",
+                    "cost_usd",
+                    "cached",
+                    "significant_terms",
+                    "suggestive_terms",
+                    "grounding",
+                )
+            }
         )
+    payload = summaries[0] if len(summaries) == 1 else {s["direction"]: s for s in summaries}
+    click.echo(json.dumps(payload, indent=2))
 
 
 @main.command()

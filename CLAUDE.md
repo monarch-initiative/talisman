@@ -39,7 +39,6 @@ Most of talisman was copied from ontogpt 0.3.6, and much of it still calls ontog
   engine. `eval-enrichment` and `create-gene-set` use
   `talisman.evaluation.enrichment.eval_enrichment.EvalEnrichment`, which subclasses ontogpt 0.3.6's
   `EvalEnrichment` to fix its constructor, model lookup, and annotation loader bugs (#49).
-- The README's `ontogpt enrichment` example runs ontogpt's code, not talisman's.
 - Most Makefile targets, the `src/ontogpt/templates` exclude in `tox.ini` and `.cruft.json` are
   ontogpt leftovers. Don't run `cruft update`.
 
@@ -55,11 +54,15 @@ Most of talisman was copied from ontogpt 0.3.6, and much of it still calls ontog
 - `amigo3-summarize` and `amigo3-benchmark` call Claude through `claude -p`, billed to the signed-in
   Claude Code account, and need a running AmiGO 3 server (default `http://127.0.0.1:8030`).
   `--max-budget-usd` caps a call. See the README section and `/amigo3-run`.
+- `tabular-enrichment` runs local hypergeometric and Mann-Whitney U tests on `.xlsx`/`.tsv`/`.csv`
+  gene-to-GO tables (no LLM calls); `tabular-summarize` summarizes those output tables with Claude
+  through `claude -p` (cached by default in `<results_dir>/.claude_cache.db`, or `--cache-db`).
 - Answers are cached with no expiry in the working directory: `.openai_cache.db` and
-  `.talisman_claude_cache.db` (`talisman --cache-db <file>` moves both), and
+  `.talisman_claude_cache.db` (`talisman --cache-db <file>` moves both, plus `tabular-summarize`'s
+  default `<results_dir>/.claude_cache.db`), and
   `.gene_requests_cache.sqlite` (Alliance gene descriptions). A cached re-run is free, and it is not
-  a fresh result. For a fresh answer, pass `--no-cache` to the amigo3 commands, or point
-  `enrichment` at another `--cache-db` file.
+  a fresh result. For a fresh answer, pass `--no-cache` to the amigo3 or `tabular-summarize`
+  commands, or point `enrichment` at another `--cache-db` file.
 - The first ontology lookup downloads several GB of `sqlite:obo:*` databases into `~/.data/oaklib/`.
 
 ## Git
