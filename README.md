@@ -49,13 +49,13 @@ Options:
 * `--prompt-template TEXT` - Path to a file containing the prompt.
 * `--interactive` / `--no-interactive` - Interactive mode - rather than call the API, the function will present a walkthrough process. Defaults to False.
 
-Example:
+Example (requires an OpenAI API key via `export OPENAI_API_KEY=...` or `uv run runoak set-apikey -e openai <key>`):
 
 ```bash
-ontogpt enrichment -r sqlite:obo:hgnc -U tests/input/genesets/EDS.yaml
+uv run talisman enrichment -r sqlite:obo:hgnc -U tests/input/genesets/EDS.yaml -o eds.yaml
 ```
 
-In this case, the prompt will include gene summaries retrieved from the database.
+In this case, the prompt will include gene summaries retrieved from the Alliance of Genome Resources database. To summarize a list of pre-selected ontology term names directly without gene description lookup, set `lacks_descriptions: true` in the input YAML (see `tests/input/genesets/microbiome.yaml`).
 
 The response text will include, among other fields, a summary like this:
 
@@ -83,17 +83,24 @@ query the AmiGO 3 database read-only while it writes, through the same tools as 
 
 Requirements:
 
-* A running AmiGO 3 server. Build one with `uv run amigo3 fetch` and
-  `uv run amigo3 build --repository /path/to/ai-gene-review`, then
-  `uv run amigo3 serve --backend duckdb` (no Solr needed). Without `--repository`, only
-  `go` and `mgsa` work; the others are reported in `skipped_methods`.
-* [Claude Code](https://claude.com/claude-code), signed in. TALISMAN runs `claude -p`, so calls
+* A running AmiGO 3 server (default `http://127.0.0.1:8030`, or pass `--amigo3-url`). To build and run one locally (requires `uv` and a Rust toolchain for `genesets`/MGSA):
+  ```bash
+  git clone https://github.com/geneontology/amigo3-prototype.git
+  git clone https://github.com/geneontology/ai-gene-review.git
+  cd amigo3-prototype
+  uv sync
+  uv run amigo3 fetch
+  uv run amigo3 build --repository ../ai-gene-review
+  uv run amigo3 serve --backend duckdb --genesets-url ''
+  ```
+  (No Solr or Docker needed. Without `--repository`, only `go` and `mgsa` work; the others are reported in `skipped_methods`.)
+* [Claude Code](https://claude.com/claude-code), signed in (`claude auth status`). TALISMAN runs `claude -p`, so calls
   are billed to that sign-in; set `CLAUDE_CONFIG_DIR` to choose between accounts. No API key
   is needed.
 
 ```bash
-talisman amigo3-summarize -U tests/input/genesets/HALLMARK_GLYCOLYSIS.yaml -o glycolysis.yaml
-talisman amigo3-summarize --agent --amigo3-dir ../amigo3-prototype -m opus HK1 PFKM PKM ENO1
+uv run talisman amigo3-summarize -U tests/input/genesets/HALLMARK_GLYCOLYSIS.yaml --max-budget-usd 0.50 -o /tmp/glycolysis.yaml
+uv run talisman amigo3-summarize --agent --amigo3-dir ../amigo3-prototype --max-budget-usd 0.50 -m sonnet HK1 PFKM PKM ENO1
 ```
 
 Useful options: `--methods` (default `go,mgsa,gocam,neighborhood`), `--aspect P|F|C|all` (or
@@ -127,6 +134,20 @@ with curated expected GO terms, and reports the recall of those terms (filtered 
   MGSA-active term
 
 It runs one set by default; pass `--limit 0` for all of them, or `--set-id` to pick sets.
+
+### Tabular GO Enrichment and Summarization (`tabular-enrichment` and `tabular-summarize`)
+
+For organisms not in AmiGO 3 or custom correlation/expression workbooks (`.xlsx` or `.tsv` with a `genes incldg GO` table containing `gene_id`, `go_id`, `go_ontology`, `go_term`, `Significant?`, `pos/neg corr`, `r (Pearson)`, `FPKM average (samples)`, and `hypothetical protein?`), TALISMAN provides built-in statistical enrichment and grounded Claude summarization:
+
+```bash
+# 1. Run one-sided hypergeometric over-representation and two-sided Mann-Whitney U rank tests
+uv run talisman tabular-enrichment workbook.xlsx results/
+
+# 2. Summarize significant (FDR <= 0.05) and suggestive (FDR <= 0.25) terms with Claude Code
+uv run talisman tabular-summarize results/ both --context-file experiment_context.txt
+```
+
+`tabular-enrichment` writes `enrichment_pos.tsv`, `enrichment_neg.tsv`, `rank_test.tsv`, and `enrichment_summary.json` to `results/` (collapsing redundant significant terms that share identical gene sets to the most specific representative term). `tabular-summarize` writes `summary_up.md`, `summary_up.json`, `summary_down.md`, and `summary_down.json`, auditing every cited GO ID against the tables (`ungrounded_ids` and `theme_ids_not_significant`).
 
 ## Citation
 
