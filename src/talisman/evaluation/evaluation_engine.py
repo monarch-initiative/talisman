@@ -14,9 +14,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Set, Type, Union
 
 from oaklib import BasicOntologyInterface
+from ontogpt.engines.spires_engine import SPIRESEngine
 from pydantic import BaseModel
-
-from talisman.engines.spires_engine import SPIRESEngine
 
 
 def jaccard_index(a: Set, b: Set):

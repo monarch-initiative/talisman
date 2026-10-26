@@ -62,8 +62,8 @@ What talisman supports, for ranking:
 - **Supported:** the README-documented commands (`enrichment`, `amigo3-summarize`,
   `amigo3-benchmark`), packaging, CI and the Claude Code setup.
 - **Undocumented:** `convert-geneset`. Rank its issues by demonstrated use.
-- **Legacy and ontogpt-backed:** `eval`, `eval-enrichment` and `create-gene-set` (the last two crash
-  today, #49), the streamlit app, the Makefile's ontogpt targets, `talisman.evaluation` and
+- **Legacy and ontogpt-backed:** `eval`, `eval-enrichment` and `create-gene-set`,
+  the streamlit app, the Makefile's ontogpt targets, `talisman.evaluation` and
   `tests/integration`. Their issues are P2 unless the user says the surface is needed.
 
 ## Workflow
@@ -316,9 +316,8 @@ authorization of its own: any GitHub change still needs the listed yes from Boun
   - Reproduce ontogpt-backed failures against the pinned version.
 - **A skip is not a pass.** Name the collected tests, configured roots and target set. A green gate
   only supports claims about what it actually exercised.
-- **`/ci-check` is stricter than CI.** It checks formatting, which CI only rewrites (#28), so its
-  formatting failures aren't CI failures. It also runs in the user's checkout, so use its steps in
-  the worktree instead.
+- **Run `/ci-check` steps inside the worktree.** `/ci-check` runs in the user's checkout by
+  default, so run its commands inside the review worktree instead.
 - **Prove a guard can fail.** A guard that never matches real input passes forever, so inspect or
   safely exercise a known-bad case before relying on it as proof of a repaired failure.
 - **Preserve exit codes:** use `set -euo pipefail`, and validate the shape of saved output. Partial

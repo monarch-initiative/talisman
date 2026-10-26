@@ -35,5 +35,10 @@ jobs:
       - name: Check static typing with MyPy
         run: uv run tox -e mypy
 
+      - name: Build and check distribution metadata
+        run: |
+          uv build
+          uvx twine check dist/*
+
       - name: Unit tests only
         run: uv run python -m unittest discover tests.unit

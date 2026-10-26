@@ -15,8 +15,6 @@ from ontogpt import DEFAULT_MODEL, DEFAULT_MODEL_DETAILS, MODELS, __version__
 from ontogpt.engines import create_engine
 from ontogpt.engines.knowledge_engine import KnowledgeEngine
 from ontogpt.evaluation.enrichment import eval_enrichment as ontogpt_eval_enrichment
-from ontogpt.evaluation.enrichment.eval_enrichment import EvalEnrichment
-from ontogpt.evaluation.resolver import create_evaluator
 from ontogpt.io.csv_wrapper import output_parser
 from ontogpt.io.html_exporter import HTMLExporter
 from ontogpt.io.markdown_exporter import MarkdownExporter
@@ -34,6 +32,8 @@ from talisman.engines.amigo3_summarizer import (
     summarize_with_amigo3,
 )
 from talisman.engines.enrichment import EnrichmentEngine
+from talisman.evaluation.enrichment.eval_enrichment import EvalEnrichment
+from talisman.evaluation.resolver import create_evaluator
 from talisman.utils.gene_set_utils import (
     GeneSet,
     _is_human,
@@ -43,8 +43,9 @@ from talisman.utils.gene_set_utils import (
 )
 
 # ontogpt 0.3.6's evaluator drops genes with its own copy of drop_genes_from_gene_set, which
-# fails on Python 3.11+ (#25), and ontogpt is pinned. Give it talisman's fixed copy.
+# fails on Python 3.11+ (#25), and ontogpt is pinned. Give it talisman's fixed copies (#25, #49).
 ontogpt_eval_enrichment.drop_genes_from_gene_set = drop_genes_from_gene_set
+ontogpt_eval_enrichment.EvalEnrichment = EvalEnrichment
 
 __all__ = [
     "main",

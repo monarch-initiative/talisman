@@ -11,7 +11,7 @@ all: all_pydantic
 
 all_pydantic: $(patsubst %, $(TEMPLATE_DIR)/%.py, $(TEMPLATES))
 all_projects: $(patsubst %, projects/%, $(TEMPLATES))
-all_docs: $(patsubst %, docs/%/index.md, $(TEMPLATES))
+all_docs: docs/index.md
 
 list_templates: $(TEMPLATE_DIR)/*.yaml
 	@echo $(basename $^)
@@ -43,13 +43,10 @@ projects/%: src/$(PACKAGE)/templates/%.yaml
 docs/index.md: README.md
 	cp $< $@
 
-docs/%/index.md: src/$(PACKAGE)/templates/%.yaml
-	$(RUN) gen-doc --include-top-level-diagram --diagram-type er_diagram $< -d docs/$*
-
-serve:
+serve: docs/index.md
 	$(RUN) mkdocs serve
 
-gh-deploy:
+gh-deploy: docs/index.md
 	$(RUN) mkdocs gh-deploy
 
 # -- OWL Pipeline --

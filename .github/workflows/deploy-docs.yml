@@ -6,7 +6,12 @@ on:
     branches: [ main ]
 
     paths:
-    - 'docs/*/*.md'
+    - 'docs/**'
+    - 'mkdocs.yml'
+    - 'README.md'
+
+permissions:
+  contents: write
 
 jobs:
   build-docs:
@@ -15,7 +20,7 @@ jobs:
 
     steps:
     - name: Check out repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0 
 
@@ -34,5 +39,5 @@ jobs:
     - name: Create local docs
       run: |
         touch docs/.nojekyll
-        make all_docs
+        cp README.md docs/index.md
         make gh-deploy
