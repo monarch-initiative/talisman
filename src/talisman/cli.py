@@ -28,7 +28,11 @@ from ontogpt.templates.core import ExtractionResult
 from talisman.amigo3_benchmark import run_benchmark
 from talisman.amigo3_client import DEFAULT_AMIGO3_URL, DEFAULT_METHODS, METHODS, Amigo3Client
 from talisman.claude_code import DEFAULT_CACHE_DB, DEFAULT_CLAUDE_MODEL, ClaudeCodeClient
-from talisman.engines.amigo3_summarizer import summarize_with_amigo3
+from talisman.engines.amigo3_summarizer import (
+    DEFAULT_MAX_TERMS,
+    parse_aspects,
+    summarize_with_amigo3,
+)
 from talisman.engines.enrichment import EnrichmentEngine
 from talisman.utils.gene_set_utils import (
     GeneSet,
@@ -416,10 +420,9 @@ def amigo3_options(f):
         ),
         click.option(
             "--aspect",
-            type=click.Choice(["P", "F", "C"]),
             default="P",
             show_default=True,
-            help="GO aspect for the GO-term methods.",
+            help="GO aspect(s) for GO-term methods: P, F, C, all, or comma-separated (e.g. P,C).",
         ),
         click.option(
             "--evidence",
@@ -431,7 +434,7 @@ def amigo3_options(f):
         click.option(
             "--max-terms",
             type=int,
-            default=25,
+            default=DEFAULT_MAX_TERMS,
             show_default=True,
             help="Most significant sets per method to show the model.",
         ),
@@ -483,6 +486,10 @@ def _amigo3_setup(
     unknown = [m for m in method_list if m not in METHODS]
     if unknown:
         raise click.BadParameter(f"Unknown methods: {', '.join(unknown)}", param_hint="--methods")
+    try:
+        parse_aspects(aspect)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--aspect") from e
     if agent and not amigo3_dir:
         raise click.UsageError("--agent needs --amigo3-dir")
     claude = ClaudeCodeClient(
@@ -575,6 +582,10 @@ def amigo3_summarize(
     )
     if result.ungrounded_ids:
         logging.warning(f"Cited IDs not in the enrichment results: {result.ungrounded_ids}")
+    if result.misattributed_ids:
+        logging.warning(
+            f"Cited theme IDs not in the listed methods' tables: {result.misattributed_ids}"
+        )
     if show_prompt:
         click.echo(result.prompt, err=True)
     # Not dump_minimal_yaml: it drops false and empty fields, e.g. an empty ungrounded_ids.
