@@ -1,12 +1,14 @@
 """Command line interface for TALISMAN."""
 
 import codecs
+import json
 import logging
 import pickle
 import sys
 from copy import copy
 from dataclasses import dataclass
 from io import BytesIO, TextIOWrapper
+from pathlib import Path
 from typing import List, Optional, Union
 
 import click
@@ -34,6 +36,17 @@ from talisman.engines.amigo3_summarizer import (
 from talisman.engines.enrichment import EnrichmentEngine
 from talisman.evaluation.enrichment.eval_enrichment import EvalEnrichment
 from talisman.evaluation.resolver import create_evaluator
+from talisman.tabular_enrichment import (
+    DEFAULT_CONTEXT,
+    DEFAULT_SYSTEM_PROMPT,
+    FDR,
+    MIN_SIZE,
+    SHEET,
+    build_prompt,
+    run_tabular_enrichment,
+    summarize_tabular_enrichment,
+    term_tables,
+)
 from talisman.utils.gene_set_utils import (
     GeneSet,
     _is_human,
@@ -644,6 +657,160 @@ def amigo3_benchmark(
     )
     # Not dump_minimal_yaml: it drops zero scores and empty lists.
     output.write(yaml.safe_dump(report, sort_keys=False, allow_unicode=True))
+
+
+@main.command("tabular-enrichment")
+@click.argument("workbook", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("outdir", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--sheet",
+    default=SHEET,
+    show_default=True,
+    help="Workbook sheet name (ignored for .tsv/.csv inputs).",
+)
+@click.option(
+    "--min-size",
+    type=int,
+    default=MIN_SIZE,
+    show_default=True,
+    help="Minimum background gene count to test a GO term.",
+)
+@click.option(
+    "--fdr",
+    type=float,
+    default=FDR,
+    show_default=True,
+    help="Benjamini-Hochberg FDR significance threshold.",
+)
+def tabular_enrichment_cmd(
+    workbook: Path, outdir: Path, sheet: str, min_size: int, fdr: float
+) -> None:
+    """Run hypergeometric over-representation and Mann-Whitney rank tests on a gene-to-GO table.
+
+    Writes enrichment_pos.tsv, enrichment_neg.tsv, rank_test.tsv, and enrichment_summary.json
+    to OUTDIR.
+    """
+    summary = run_tabular_enrichment(workbook, outdir, sheet=sheet, min_size=min_size, fdr=fdr)
+    click.echo(json.dumps(summary, indent=2))
+
+
+@main.command("tabular-summarize")
+@click.argument("results_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument(
+    "direction",
+    type=click.Choice(["up", "down", "both"]),
+    default="both",
+)
+@click.option("--context", help="Experiment and organism context text for the prompt.")
+@click.option(
+    "--context-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a text file containing experiment and organism context.",
+)
+@click.option(
+    "--system-prompt-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    help="Path to a custom system prompt file.",
+)
+@click.option(
+    "--model",
+    "-m",
+    default=DEFAULT_CLAUDE_MODEL,
+    show_default=True,
+    help="Claude Code model alias or full ID (e.g. sonnet, opus).",
+)
+@click.option(
+    "--max-budget-usd",
+    type=float,
+    default=0.5,
+    show_default=True,
+    help="Stop a Claude call that would spend more than this.",
+)
+@click.option(
+    "--claude-command",
+    default="claude",
+    show_default=True,
+    help="Claude Code executable. Set CLAUDE_CONFIG_DIR to choose its account.",
+)
+@click.option(
+    "--cache/--no-cache",
+    default=True,
+    show_default=True,
+    help="Reuse Claude replies from the cache (--cache-db, else RESULTS_DIR/.claude_cache.db).",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Print the prompt and exit without calling Claude.",
+)
+def tabular_summarize_cmd(
+    results_dir: Path,
+    direction: str,
+    context: Optional[str],
+    context_file: Optional[Path],
+    system_prompt_file: Optional[Path],
+    model: str,
+    max_budget_usd: float,
+    claude_command: str,
+    cache: bool,
+    dry_run: bool,
+) -> None:
+    """Summarize tabular GO enrichment and rank-test tables with Claude Code.
+
+    Reads enrichment_pos.tsv, enrichment_neg.tsv, and rank_test.tsv from RESULTS_DIR,
+    audits all cited GO IDs against the significant and suggestive tables, and writes
+    summary_<direction>.json and summary_<direction>.md.
+    """
+    if context and context_file:
+        raise click.UsageError("Pass either --context or --context-file, not both.")
+    resolved_context = (
+        context_file.read_text(encoding="utf-8").rstrip("\n")
+        if context_file
+        else (context if context is not None else DEFAULT_CONTEXT)
+    )
+    resolved_system_prompt = (
+        system_prompt_file.read_text(encoding="utf-8").rstrip("\n")
+        if system_prompt_file
+        else DEFAULT_SYSTEM_PROMPT
+    )
+    directions = ("up", "down") if direction == "both" else (direction,)
+    if dry_run:
+        for d in directions:
+            significant, suggestive = term_tables(results_dir, d)
+            click.echo(build_prompt(d, significant, suggestive, context=resolved_context), nl=False)
+        return
+    cache_path = (settings.cache_db or str(results_dir / ".claude_cache.db")) if cache else None
+    client = ClaudeCodeClient(
+        model=model,
+        command=[claude_command],
+        cache_db=cache_path,
+        max_budget_usd=max_budget_usd,
+    )
+    for d in directions:
+        out = summarize_tabular_enrichment(
+            results_dir,
+            d,
+            client,
+            context=resolved_context,
+            system_prompt=resolved_system_prompt,
+        )
+        click.echo(
+            json.dumps(
+                {
+                    k: out[k]
+                    for k in (
+                        "direction",
+                        "model",
+                        "cost_usd",
+                        "cached",
+                        "significant_terms",
+                        "suggestive_terms",
+                        "grounding",
+                    )
+                },
+                indent=2,
+            )
+        )
 
 
 @main.command()
