@@ -10,7 +10,11 @@ from unittest import mock
 from talisman.amigo3_benchmark import run_benchmark, score
 from talisman.amigo3_client import Amigo3Client, Amigo3Error
 from talisman.claude_code import ClaudeCodeClient, ClaudeCodeError
-from talisman.engines.amigo3_summarizer import select_rows, summarize_with_amigo3
+from talisman.engines.amigo3_summarizer import (
+    parse_aspects,
+    select_rows,
+    summarize_with_amigo3,
+)
 from talisman.utils.gene_set_utils import Gene, GeneSet
 
 STUDY = {
@@ -169,6 +173,78 @@ class TestSelectRows(unittest.TestCase):
         table = select_rows("go", RESULTS["go"], max_genes=2)
         self.assertEqual("HK1, PKM (+1 more)", table["rows"][0]["genes"])
 
+    def test_diversifies_beyond_max_terms_with_mgsa_and_gene_coverage(self):
+        terms = [
+            {
+                "id": "GO:0000001",
+                "label": "broad term 1",
+                "study_count": 2,
+                "term_size": 500,
+                "p_value": 1e-6,
+                "fdr": 1e-5,
+                "genes": [
+                    {"id": "UniProtKB:P19367", "symbol": "HK1"},
+                    {"id": "UniProtKB:P14618", "symbol": "PKM"},
+                ],
+            },
+            {
+                "id": "GO:0000002",
+                "label": "redundant broad term 2",
+                "study_count": 2,
+                "term_size": 400,
+                "p_value": 2e-6,
+                "fdr": 2e-5,
+                "genes": [
+                    {"id": "UniProtKB:P19367", "symbol": "HK1"},
+                    {"id": "UniProtKB:P14618", "symbol": "PKM"},
+                ],
+            },
+            {
+                "id": "GO:0000003",
+                "label": "redundant broad term 3",
+                "study_count": 2,
+                "term_size": 350,
+                "p_value": 3e-6,
+                "fdr": 3e-5,
+                "genes": [
+                    {"id": "UniProtKB:P19367", "symbol": "HK1"},
+                    {"id": "UniProtKB:P14618", "symbol": "PKM"},
+                ],
+            },
+            {
+                "id": "GO:0000004",
+                "label": "specific term covering ENO1",
+                "study_count": 1,
+                "term_size": 15,
+                "p_value": 1e-3,
+                "fdr": 0.01,
+                "genes": [{"id": "UniProtKB:P06733", "symbol": "ENO1"}],
+            },
+            {
+                "id": "GO:0000005",
+                "label": "mgsa equivalent term",
+                "study_count": 2,
+                "term_size": 30,
+                "p_value": 2e-3,
+                "fdr": 0.02,
+                "genes": [
+                    {"id": "UniProtKB:P19367", "symbol": "HK1"},
+                    {"id": "UniProtKB:P14618", "symbol": "PKM"},
+                ],
+            },
+        ]
+        table = select_rows(
+            "go",
+            response("Over-representation", terms),
+            max_terms=3,
+            priority_ids={"GO:0000005"},
+        )
+        self.assertEqual(5, table["n_significant"])
+        self.assertEqual(
+            ["GO:0000001", "GO:0000004", "GO:0000005"],
+            [r["id"] for r in table["rows"]],
+        )
+
 
 class TestSummarize(unittest.TestCase):
     def setUp(self):
@@ -202,6 +278,59 @@ class TestSummarize(unittest.TestCase):
         result = summarize_with_amigo3(self.gene_set, "human", self.amigo3, self.claude, ["go"])
         self.assertEqual(["GO:0006096"], result.nonsignificant_ids)
         self.assertEqual(["GO:9999999"], result.ungrounded_ids)
+        self.assertEqual(["GO:0006096"], result.misattributed_ids)
+        self.assertNotIn("GO:0006096", result.prompt)
+        self.assertIn("- glycolysis (3/20, FDR (BH) 0.3: HK1, PKM, ENO1)", result.prompt)
+
+    def test_misattributed_theme_ids(self):
+        result = self.summarize()
+        self.assertEqual([], result.misattributed_ids)
+        self.amigo3.results = {
+            "go": RESULTS["go"],
+            "mgsa": response(
+                "Model-based (MGSA, Bayesian)",
+                [go_term("GO:0005975", "carbohydrate metabolic process", 0.01, posterior=0.9)],
+            ),
+        }
+        result = self.summarize()
+        self.assertEqual(["GO:0006096"], result.misattributed_ids)
+
+    def test_multi_aspect_summarize(self):
+        self.assertEqual(["P", "F", "C"], parse_aspects("all"))
+        self.assertEqual(["P", "C"], parse_aspects("P,C"))
+        with self.assertRaises(ValueError):
+            parse_aspects("X")
+        calls = []
+
+        def enrich_multi(genes, species, method="go", **parameters):
+            aspect = parameters.get("aspect")
+            calls.append((method, aspect))
+            if method == "gocam":
+                return response("GO-CAM", [go_term("gomodel:123", "glycolysis model", 0.01)])
+            if aspect == "C":
+                return response(
+                    method,
+                    [go_term("GO:0005829", "cytosol", 0.002, posterior=0.8)],
+                )
+            return RESULTS[method]
+
+        self.amigo3.enrich = enrich_multi
+        result = summarize_with_amigo3(
+            self.gene_set,
+            "human",
+            self.amigo3,
+            self.claude,
+            ["go", "mgsa", "gocam"],
+            aspect="P,C",
+        )
+        self.assertEqual(
+            [("go", "P"), ("go", "C"), ("mgsa", "P"), ("mgsa", "C"), ("gocam", "P")],
+            calls,
+        )
+        self.assertEqual(
+            ["GO:0006096", "GO:0005829", "GO:0005975"],
+            result.significant_ids["go"],
+        )
 
     def test_ambiguous_genes(self):
         study = {**STUDY, "ambiguous": [{"input": "TWIN", "candidates": []}]}
@@ -331,6 +460,46 @@ class TestClaudeCodeClient(unittest.TestCase):
             with self.assertRaises(ClaudeCodeError):
                 client.complete("prompt", "system", {"type": "object"})
 
+    def test_agent_toolless_run_is_not_cached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_db = str(Path(tmp) / "cache.db")
+            client = ClaudeCodeClient(
+                cache_db=cache_db,
+                mcp_config={"mcpServers": {"amigo3": {"command": "uv"}}},
+                allowed_tools=["mcp__amigo3__query_sql"],
+            )
+            reply1, run1 = self.run_client(client)
+            self.assertFalse(reply1["cached"])
+            self.assertEqual(1, run1.call_count)
+            # Tool-less agent reply (num_turns == 2) was not cached, so next call runs claude again
+            tool_reply = {**self.REPLY, "num_turns": 4}
+            reply2, run2 = self.run_client(client, stdout=json.dumps(tool_reply))
+            self.assertFalse(reply2["cached"])
+            self.assertEqual(1, run2.call_count)
+            # Once tools were used (num_turns == 4), the reply is cached
+            reply3, run3 = self.run_client(client)
+            self.assertTrue(reply3["cached"])
+            run3.assert_not_called()
+
+    def test_resolved_model_and_alias_env_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_db = str(Path(tmp) / "cache.db")
+            alias_client = ClaudeCodeClient(model="sonnet", cache_db=cache_db)
+            reply, _ = self.run_client(alias_client)
+            self.assertFalse(reply["cached"])
+            # Pinned resolved model ID hits the cache entry written under the alias
+            pinned_client = ClaudeCodeClient(model="claude-sonnet-5-5", cache_db=cache_db)
+            pinned_reply, run = self.run_client(pinned_client)
+            self.assertTrue(pinned_reply["cached"])
+            run.assert_not_called()
+            # Changing ANTHROPIC_DEFAULT_SONNET_MODEL changes the effective model key
+            with mock.patch.dict(
+                "os.environ", {"ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6"}
+            ):
+                env_reply, env_run = self.run_client(alias_client)
+                self.assertFalse(env_reply["cached"])
+                self.assertEqual(1, env_run.call_count)
+
 
 class TestAmigo3Client(unittest.TestCase):
     def test_error_detail(self):
@@ -390,3 +559,40 @@ class TestBenchmark(unittest.TestCase):
         self.assertEqual(1, len(report["failed"]))
         with self.assertRaises(ValueError):
             self.run_sets(identifiers=["NO_SUCH_SET"])
+
+    def test_filters_expected_terms_by_tested_aspect(self):
+        amigo3 = FakeAmigo3("http://amigo.test")
+        amigo3.examples = [
+            {
+                "id": "SET_A",
+                "description": "a",
+                "expected_go": [
+                    {"id": "GO:0006096", "category": "primary_process"},
+                    {"id": "GO:0005829", "category": "core_component"},
+                ],
+            }
+        ]
+        report_p = run_benchmark(
+            amigo3,
+            FakeClaude(cache_db=None),
+            ["go"],
+            aspect="P",
+            ancestors=lambda term: {term},
+        )
+        row_p = report_p["results"][0]
+        self.assertEqual(["P"], report_p["aspects"])
+        self.assertEqual(["GO:0006096"], row_p["expected"])
+        self.assertEqual(["GO:0005829"], row_p["untested_aspect_expected"])
+        self.assertEqual(1.0, row_p["scores"]["claude"]["exact"])
+
+        report_pc = run_benchmark(
+            amigo3,
+            FakeClaude(cache_db=None),
+            ["go"],
+            aspect="P,C",
+            ancestors=lambda term: {term},
+        )
+        row_pc = report_pc["results"][0]
+        self.assertEqual(["P", "C"], report_pc["aspects"])
+        self.assertEqual(2, len(row_pc["expected"]))
+        self.assertEqual([], row_pc["untested_aspect_expected"])

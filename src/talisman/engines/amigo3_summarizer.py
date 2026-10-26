@@ -14,12 +14,12 @@ import logging
 import shutil
 from dataclasses import replace
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 from jinja2 import Template
 from pydantic import BaseModel
 
-from talisman.amigo3_client import Amigo3Client, run_methods
+from talisman.amigo3_client import Amigo3Client, Amigo3Error, run_methods
 from talisman.claude_code import ClaudeCodeClient
 from talisman.prompts.amigo3 import DEFAULT_AMIGO3_PROMPT
 from talisman.utils.gene_set_utils import GeneSet
@@ -40,15 +40,20 @@ GENES_FIELD = {"neighborhood": "overlap_genes"}
 connectivity, where "genes" holds the study genes connected to the set."""
 MAX_RESULTS = 5000
 """amigo3's maximum; its default of 500 would undercount significant sets."""
+DEFAULT_MAX_TERMS = 50
 GO_TERM_METHODS = ("go", "mgsa")
+ASPECT_METHODS = ("go", "mgsa", "network")
+VALID_ASPECTS = ("P", "F", "C")
 CONTEXT_ROWS = 5
 """Rows shown for a method with no significant set."""
 
 SYSTEM_PROMPT = (
     "You interpret gene set enrichment results for biologists. You are given a gene set and the "
     "results of statistical enrichment analyses that AmiGO 3 ran on it against the Gene Ontology "
-    "(GO) and GO-CAM pathway models. Ground your interpretation in these results: cite their "
-    "identifiers exactly as written and never invent identifiers. Where methods agree, say so; "
+    "(GO) and GO-CAM pathway models. Ground your interpretation in these results: cite only "
+    "significant identifiers from the result tables exactly as written, never cite non-significant "
+    "context rows in themes or enriched_terms (mention methods with no significant sets only in "
+    "caveats), and never invent identifiers. Where methods agree, say so; "
     "where they differ, say why that may be (for example, MGSA explains away ancestors and "
     "overlapping terms that the hypergeometric test lists separately). Prefer specific terms to "
     "general ones. You may use wider biological knowledge to connect the results, but say when "
@@ -160,6 +165,9 @@ class Amigo3Summary(BaseModel):
     nonsignificant_ids: List[str] = []
     """Cited IDs that were only in a table as non-significant context rows."""
 
+    misattributed_ids: List[str] = []
+    """Cited theme IDs that do not match the tables of the methods the theme lists."""
+
     unknown_genes: List[str] = []
     """Theme genes that are not in the input list."""
 
@@ -177,6 +185,29 @@ class Amigo3Summary(BaseModel):
     cost_usd: Optional[float] = None
     num_turns: Optional[int] = None
     cached: bool = False
+
+
+def parse_aspects(aspect: Optional[str]) -> List[str]:
+    """Parse an aspect specification ('P', 'P,C', 'all') into ordered GO aspects."""
+    if not aspect:
+        return ["P"]
+    parts: List[str] = []
+    for raw in str(aspect).split(","):
+        code = raw.strip().upper()
+        if not code:
+            continue
+        if code == "ALL":
+            for a in VALID_ASPECTS:
+                if a not in parts:
+                    parts.append(a)
+        elif code in VALID_ASPECTS:
+            if code not in parts:
+                parts.append(code)
+        else:
+            raise ValueError(
+                f"Unknown GO aspect {raw.strip()!r}; choose from P, F, C, all (or comma-separated)"
+            )
+    return parts or ["P"]
 
 
 def _stat_text(statistic: str, value: Optional[float]) -> str:
@@ -203,7 +234,59 @@ def _label(method: str, term: Dict) -> str:
     return label.replace("|", "/")
 
 
-def select_rows(method: str, result: Dict, max_terms: int = 25, max_genes: int = 20) -> Dict:
+def _term_gene_keys(method: str, term: Dict) -> Set[str]:
+    genes = term.get(GENES_FIELD.get(method, "genes")) or []
+    return {str(g.get("id") or g.get("symbol")) for g in genes if g.get("id") or g.get("symbol")}
+
+
+def _select_significant_terms(
+    method: str,
+    significant: List[Dict],
+    max_terms: int,
+    priority_ids: Optional[Set[str]] = None,
+) -> List[Dict]:
+    """Select up to max_terms significant rows, balancing top p-values, MGSA and coverage."""
+    if max_terms <= 0:
+        return []
+    if len(significant) <= max_terms:
+        return significant
+    selected: Set[int] = set()
+    top_n = max(1, max_terms // 2)
+    for idx in range(min(len(significant), top_n)):
+        if len(selected) >= max_terms:
+            break
+        selected.add(idx)
+    if priority_ids:
+        for idx, term in enumerate(significant):
+            if len(selected) >= max_terms:
+                break
+            if term["id"] in priority_ids:
+                selected.add(idx)
+    gene_sets = [_term_gene_keys(method, t) for t in significant]
+    covered: Set[str] = set()
+    for idx in selected:
+        covered.update(gene_sets[idx])
+    while len(selected) < max_terms:
+        best_idx = min(
+            (i for i in range(len(significant)) if i not in selected),
+            key=lambda i: (
+                -len(gene_sets[i] - covered),
+                significant[i].get("term_size") or 10**9,
+                i,
+            ),
+        )
+        selected.add(best_idx)
+        covered.update(gene_sets[best_idx])
+    return [significant[i] for i in sorted(selected)]
+
+
+def select_rows(
+    method: str,
+    result: Dict,
+    max_terms: int = DEFAULT_MAX_TERMS,
+    max_genes: int = 20,
+    priority_ids: Optional[Set[str]] = None,
+) -> Dict:
     """Pick the rows of one method's result that go into the prompt."""
     statistic, threshold, stat_label = STATISTICS[method]
     terms = [t for t in result.get("terms", []) if t.get(statistic) is not None]
@@ -212,9 +295,14 @@ def select_rows(method: str, result: Dict, max_terms: int = 25, max_genes: int =
         significant = [t for t in terms if t[statistic] >= threshold]
         threshold_text = f"{stat_label} >= {threshold}"
     else:
+        terms.sort(key=lambda t: (t[statistic], t.get("p_value", t[statistic])))
         significant = [t for t in terms if t[statistic] <= threshold]
         threshold_text = f"{stat_label} <= {threshold}"
-    shown = significant[:max_terms] if significant else terms[:CONTEXT_ROWS]
+    shown = (
+        _select_significant_terms(method, significant, max_terms, priority_ids)
+        if significant
+        else terms[:CONTEXT_ROWS]
+    )
     significant_ids = [t["id"] for t in significant]
     rows = []
     for term in shown:
@@ -253,6 +341,112 @@ def select_rows(method: str, result: Dict, max_terms: int = 25, max_genes: int =
     }
 
 
+def _term_rank_key(statistic: str, term: Dict) -> Tuple:
+    val = term.get(statistic)
+    if statistic in HIGHER_IS_BETTER:
+        return (-(val if val is not None else -1.0),)
+    p_val = term.get("p_value")
+    return (
+        val if val is not None else 1.0,
+        p_val if p_val is not None else 1.0,
+    )
+
+
+def _merge_aspect_results(method: str, aspect_results: List[Dict], aspects: List[str]) -> Dict:
+    """Combine enrichment responses for one method across multiple GO aspects."""
+    if len(aspect_results) == 1:
+        return aspect_results[0]
+    first = aspect_results[0]
+    statistic, _, _ = STATISTICS[method]
+    by_id: Dict[str, Dict] = {}
+    for res in aspect_results:
+        for term in res.get("terms", []):
+            tid = term["id"]
+            if tid not in by_id or _term_rank_key(statistic, term) < _term_rank_key(
+                statistic, by_id[tid]
+            ):
+                by_id[tid] = term
+    terms = sorted(by_id.values(), key=lambda t: _term_rank_key(statistic, t))
+    outside_sets = [set(r.get("study", {}).get("outside_background", [])) for r in aspect_results]
+    outside_common = set.intersection(*outside_sets) if outside_sets else set()
+    first_outside = first.get("study", {}).get("outside_background", [])
+    study = {
+        **first.get("study", {}),
+        "outside_background": [g for g in first_outside if g in outside_common],
+    }
+    first_params = first.get("parameters", {})
+    base_target = first_params.get("target_label", "GO terms").split(" (")[0]
+    parameters = {
+        **first_params,
+        "target_label": f"{base_target} ({', '.join(aspects)})",
+    }
+    counts = {
+        **first.get("counts", {}),
+        "study": max((r.get("counts", {}).get("study") or 0) for r in aspect_results),
+        "population": max((r.get("counts", {}).get("population") or 0) for r in aspect_results),
+        "tests": sum((r.get("counts", {}).get("tests") or 0) for r in aspect_results),
+    }
+    return {
+        **first,
+        "parameters": parameters,
+        "counts": counts,
+        "study": study,
+        "terms": terms,
+        "truncated": any(bool(r.get("truncated")) for r in aspect_results),
+    }
+
+
+def _run_enrichment(
+    amigo3: Amigo3Client,
+    inputs: List[str],
+    species: str,
+    methods: List[str],
+    parameters: Dict,
+) -> Dict[str, Dict]:
+    aspects = parse_aspects(parameters.get("aspect"))
+    if len(aspects) == 1:
+        single_params = (
+            {**parameters, "aspect": aspects[0]} if "aspect" in parameters else parameters
+        )
+        return run_methods(amigo3, inputs, species, methods, single_params)
+    results: Dict[str, Dict] = {}
+    skipped: Dict[str, str] = {}
+    for method in methods:
+        method_aspects = aspects if method in ASPECT_METHODS else [aspects[0]]
+        aspect_results = []
+        for asp in method_aspects:
+            try:
+                aspect_results.append(
+                    amigo3.enrich(inputs, species, method, **{**parameters, "aspect": asp})
+                )
+            except Amigo3Error as e:
+                logger.warning(f"Skipping {method} ({asp}): {e}")
+                skipped[method] = str(e)
+                aspect_results = []
+                break
+        if aspect_results:
+            results[method] = _merge_aspect_results(method, aspect_results, method_aspects)
+    return {"results": results, "skipped": skipped}
+
+
+def _mgsa_priority_ids(results: Dict[str, Dict]) -> Set[str]:
+    """Significant MGSA term IDs and their equivalents, used to prioritize GO rows."""
+    mgsa = results.get("mgsa")
+    if not mgsa:
+        return set()
+    statistic, threshold, _ = STATISTICS["mgsa"]
+    ids: Set[str] = set()
+    for term in mgsa.get("terms", []):
+        val = term.get(statistic)
+        if val is not None and val >= threshold:
+            ids.add(term["id"])
+            for eq in term.get("equivalents") or []:
+                eq_id = eq.get("id") if isinstance(eq, dict) else eq
+                if eq_id:
+                    ids.add(str(eq_id))
+    return ids
+
+
 def _study(results: Dict[str, Dict]) -> Dict:
     """Gene resolution as amigo3 reported it, preferring a GO-term method."""
     for method in (*GO_TERM_METHODS, "gocam", "neighborhood", "network"):
@@ -274,6 +468,21 @@ def amigo3_mcp_config(amigo3_dir: str, build_id: str) -> Dict:
     return {"mcpServers": {"amigo3": {"command": uv, "args": args}}}
 
 
+def _misattributed_theme_ids(themes: List[Theme], tables: List[Dict], shown: Set[str]) -> List[str]:
+    by_method = {t["key"]: {r["id"] for r in t["rows"]} for t in tables}
+    misattributed: List[str] = []
+    for theme in themes:
+        grounded = [i for i in theme.term_ids if i in shown]
+        if not grounded:
+            continue
+        in_listed = {i for m in theme.methods for i in by_method.get(m, set())}
+        unbacked_method = any(not (set(grounded) & by_method.get(m, set())) for m in theme.methods)
+        for tid in grounded:
+            if (tid not in in_listed or unbacked_method) and tid not in misattributed:
+                misattributed.append(tid)
+    return misattributed
+
+
 def summarize_with_amigo3(
     gene_set: GeneSet,
     species: str,
@@ -281,12 +490,13 @@ def summarize_with_amigo3(
     claude: ClaudeCodeClient,
     methods: List[str],
     parameters: Optional[Dict] = None,
-    max_terms: int = 25,
+    max_terms: int = DEFAULT_MAX_TERMS,
     max_genes: int = 20,
     gene_descriptions: bool = False,
     max_description_length: int = 300,
     amigo3_dir: Optional[str] = None,
     prompt_template: Optional[str] = None,
+    aspect: Optional[str] = None,
 ) -> Amigo3Summary:
     """Run AmiGO 3 enrichment on a gene set and have Claude summarize the results.
 
@@ -297,7 +507,9 @@ def summarize_with_amigo3(
         raise ValueError("Gene set has no gene IDs or symbols")
     build_id = amigo3.options().get("build_id")
     parameters = {"max_results": MAX_RESULTS, **(parameters or {})}
-    run = run_methods(amigo3, inputs, species, methods, parameters)
+    if aspect is not None:
+        parameters["aspect"] = aspect
+    run = _run_enrichment(amigo3, inputs, species, methods, parameters)
     results, skipped = run["results"], run["skipped"]
     if not results:
         raise ValueError(f"No enrichment method ran: {skipped}")
@@ -318,7 +530,18 @@ def summarize_with_amigo3(
                 text = text[:max_description_length].rsplit(" ", 1)[0] + "..."
             descriptions[gene_id] = descriptions[gene.symbol] = text
     genes = [{"symbol": symbols.get(i, i), "description": descriptions.get(i, "")} for i in inputs]
-    tables = [select_rows(m, results[m], max_terms, max_genes) for m in methods if m in results]
+    priority_ids = _mgsa_priority_ids(results)
+    tables = [
+        select_rows(
+            m,
+            results[m],
+            max_terms,
+            max_genes,
+            priority_ids=priority_ids if m == "go" else None,
+        )
+        for m in methods
+        if m in results
+    ]
     template_path = Path(prompt_template) if prompt_template else DEFAULT_AMIGO3_PROMPT
     prompt = Template(template_path.read_text()).render(
         name=gene_set.name,
@@ -344,13 +567,17 @@ def summarize_with_amigo3(
         system_prompt += AGENT_PROMPT
     reply = claude.complete(prompt, system_prompt, SUMMARY_SCHEMA)
     if amigo3_dir and (reply.get("num_turns") or 0) <= 2:
-        logger.warning("Agent mode made no database queries; check that the MCP server starts")
+        logger.warning(
+            "Agent mode made no database queries; check that the MCP server starts "
+            "(reply not cached)"
+        )
     out = reply["structured_output"]
     themes = [Theme(**t) for t in out.get("themes", [])]
     enriched = [EnrichedTerm(**t) for t in out.get("enriched_terms", [])]
     shown = {r["id"] for table in tables for r in table["rows"]}
     significant = {r["id"] for table in tables for r in table["rows"] if r["significant"]}
     cited = [i for t in themes for i in t.term_ids] + [t.id for t in enriched]
+    misattributed = _misattributed_theme_ids(themes, tables, shown)
     known_genes = {s.upper() for s in [*inputs, *symbols.values()]}
     theme_genes = [g for t in themes for g in t.genes]
     return Amigo3Summary(
@@ -375,6 +602,7 @@ def summarize_with_amigo3(
         nonsignificant_ids=list(
             dict.fromkeys(i for i in cited if i in shown and i not in significant)
         ),
+        misattributed_ids=misattributed,
         unknown_genes=list(dict.fromkeys(g for g in theme_genes if g.upper() not in known_genes)),
         caveats=out.get("caveats", []),
         checks=[Check(**c) for c in out.get("checks", [])],

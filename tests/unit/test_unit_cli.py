@@ -1,12 +1,21 @@
 """CLI test."""
 
+import gzip
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from click.testing import CliRunner
-from ontogpt.evaluation.enrichment.eval_enrichment import EvalEnrichment
+from oaklib.interfaces.obograph_interface import OboGraphInterface
 
 from talisman.cli import main
+from talisman.engines.enrichment import EnrichmentPayload
+from talisman.evaluation.enrichment.eval_enrichment import (
+    DATABASE_DIR,
+    ENRICHMENT_MODELS,
+    EvalEnrichment,
+)
 from talisman.utils.gene_set_utils import Gene, GeneSet
 from tests import OUTPUT_DIR
 
@@ -41,3 +50,98 @@ class TestCommandLineInterface(unittest.TestCase):
         gene_set = GeneSet(name="test", gene_ids=list(genes), genes=genes)
         evaluator.evaluate_methods_on_gene_set(gene_set, n=3)
         self.assertEqual(sizes, [10, 9, 8])
+
+    def test_eval_enrichment_post_init_and_compare_analysis(self):
+        """Test that EvalEnrichment constructs and runs compare_analysis (#49)."""
+        fake_ontology = mock.MagicMock(spec=OboGraphInterface)
+
+        def fake_create_engine(_template, _cls, model=None):
+            eng = mock.MagicMock()
+            eng.model = model or "gpt-3.5-turbo"
+            eng.summarize.side_effect = lambda gs, **kw: EnrichmentPayload(
+                summary="s",
+                term_strings=["peroxisome"],
+                term_ids=["GO:0005777"],
+                model=eng.model,
+            )
+            return eng
+
+        with (
+            mock.patch(
+                "talisman.evaluation.enrichment.eval_enrichment.get_implementation_from_shorthand",
+                return_value=fake_ontology,
+            ),
+            mock.patch(
+                "talisman.evaluation.enrichment.eval_enrichment.create_engine",
+                side_effect=fake_create_engine,
+            ),
+        ):
+            evaluator = EvalEnrichment(model="gpt-4")
+
+        self.assertEqual(set(evaluator.engines), set(ENRICHMENT_MODELS))
+        for eng in evaluator.engines.values():
+            eng.add_resolver.assert_called_once_with("sqlite:obo:hgnc")
+        evaluator.engine.add_resolver.assert_called_once_with("sqlite:obo:hgnc")
+        self.assertIsNotNone(evaluator.tokenizer_encoding)
+
+        # Mock the non-LLM ontology baseline methods so compare_analysis runs without OAK DBs.
+        baseline = EnrichmentPayload(term_strings=["t"], term_ids=["GO:0005777"])
+        with (
+            mock.patch.object(evaluator, "standard_enrichment", return_value=baseline),
+            mock.patch.object(evaluator, "random_enrichment", return_value=baseline),
+            mock.patch.object(evaluator, "null_enrichment", return_value=baseline),
+            mock.patch.object(evaluator, "gene_term_closure", return_value=baseline),
+        ):
+            gs = GeneSet(name="pex", gene_symbols=["PEX1", "PEX2"], gene_ids=["HGNC:1", "HGNC:2"])
+            comp = evaluator.compare_analysis(gs)
+
+        self.assertEqual(comp.name, "pex")
+        self.assertIn("gpt-4.ontological_synopsis.v1", comp.payloads)
+        self.assertIn("gpt-4.narrative_synopsis.v2", comp.payloads)
+        self.assertIn("standard", comp.payloads)
+
+    def test_eval_enrichment_annotations_default_and_path_object(self):
+        """Test get_annotation_tuples default path and load_annotations with Path (#49)."""
+        evaluator = EvalEnrichment.__new__(EvalEnrichment)
+        evaluator.loaded = False
+        evaluator.ontology = mock.MagicMock()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tsv_gz = Path(tmp) / "gene2go.tsv.gz"
+            with gzip.open(tsv_gz, "wt", encoding="utf-8") as fh:
+                fh.write("PEX1\tGO:0005777\n")
+
+            with (
+                mock.patch(
+                    "talisman.evaluation.enrichment.eval_enrichment.DATABASE_DIR",
+                    Path(tmp),
+                ),
+                mock.patch(
+                    "ontogpt.evaluation.enrichment.eval_enrichment.get_symbol_to_gene_id_map",
+                    return_value={"PEX1": "HGNC:8850"},
+                ),
+            ):
+                tuples = list(evaluator.get_annotation_tuples(None))
+                self.assertEqual(tuples, [("PEX1", "GO:0005777")])
+                evaluator.load_annotations(tsv_gz)
+
+        self.assertTrue(evaluator.loaded)
+        evaluator.ontology.add_associations.assert_called_once()
+        self.assertTrue(str(DATABASE_DIR).endswith("database"))
+
+    def test_create_gene_set_cli(self):
+        """Test that create-gene-set CLI command runs with fixed EvalEnrichment (#49)."""
+        fake_eval = mock.MagicMock()
+        fake_eval.create_gene_set_from_term.return_value = GeneSet(
+            name="term-GO:0005777",
+            gene_symbols=["PEX1"],
+            gene_ids=["HGNC:8850"],
+        )
+        with mock.patch("talisman.cli.EvalEnrichment", return_value=fake_eval):
+            result = self.runner.invoke(
+                main, ["create-gene-set", "-A", "tests/input/genes2go.tsv.gz", "GO:0005777"]
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        fake_eval.load_annotations.assert_called_once_with("tests/input/genes2go.tsv.gz")
+        fake_eval.create_gene_set_from_term.assert_called_once_with("GO:0005777")
+        self.assertIn("PEX1", result.stdout)

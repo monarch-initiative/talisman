@@ -5,6 +5,10 @@ on:
   release:
     types: [created]
     
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   build-n-publish:
     name: Build and publish Python 🐍 distributions 📦 to PyPI
@@ -18,8 +22,32 @@ jobs:
         with:
           version: "0.13.5"
 
+      - name: Verify PyPI package name
+        env:
+          PYPI_PACKAGE_NAME: ${{ vars.PYPI_PACKAGE_NAME }}
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          with open("pyproject.toml", encoding="utf-8") as fh:
+              match = re.search(r'^name\s*=\s*"([^"]+)"', fh.read(), re.M)
+          pkg_name = match.group(1) if match else ""
+          expected = os.environ.get("PYPI_PACKAGE_NAME", "").strip()
+          if pkg_name == "talisman" and expected != "talisman":
+              sys.exit(
+                  "Error: [project] name in pyproject.toml is 'talisman', which is already owned "
+                  "by an unrelated package on PyPI (#34). Update [project] name in pyproject.toml "
+                  "(or set the PYPI_PACKAGE_NAME repository variable if ownership changed) before "
+                  "publishing."
+              )
+          if expected and pkg_name != expected:
+              sys.exit(f"Error: pyproject.toml name '{pkg_name}' != PYPI_PACKAGE_NAME '{expected}'.")
+          PY
+
       - name: Build source and wheel archives
         run: uv build
+
+      - name: Check distribution metadata
+        run: uvx twine check dist/*
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086  # v1.14.3

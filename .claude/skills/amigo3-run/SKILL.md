@@ -34,9 +34,9 @@ These commands make billed Claude Code calls (`claude -p` with the signed-in acc
 3. **Check the output, not the exit code.**
    - **amigo3-summarize:**
      - The YAML has a summary.
-     - `ungrounded_ids`, `nonsignificant_ids` and `unknown_genes` are empty; if not, list them.
+     - `ungrounded_ids`, `nonsignificant_ids`, `misattributed_ids` and `unknown_genes` are empty; if not, list them.
      - Report `unresolved_genes`, `skipped_methods`, `cost_usd` and `num_turns`. With `--agent`,
-       more than 2 turns means Claude used the database tools.
+       more than 2 turns means Claude used the database tools (replies with `num_turns <= 2` are not cached).
    - **amigo3-benchmark:**
      - `sets` is the number requested, and `failed` is empty. A failed set still exits 0, with its
        error under `failed`.

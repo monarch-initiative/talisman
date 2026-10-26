@@ -8,6 +8,7 @@ in SQLite by everything that shapes them, so re-running a prompt is free.
 import hashlib
 import json
 import logging
+import os
 import sqlite3
 import subprocess  # noqa: S404
 import tempfile
@@ -19,6 +20,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CLAUDE_MODEL = "sonnet"
 DEFAULT_CACHE_DB = ".talisman_claude_cache.db"
+MODEL_ALIAS_ENV_VARS = {
+    "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "haiku": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "default": "ANTHROPIC_MODEL",
+}
 
 
 class ClaudeCodeError(Exception):
@@ -46,7 +53,7 @@ class ClaudeCodeClient:
         """Send one prompt and return the structured reply with cost and model metadata."""
         key = self._key(prompt, system_prompt, json_schema)
         cached = self._cache_get(key)
-        if cached is not None:
+        if cached is not None and self._is_cacheable(cached):
             return {**cached, "cached": True}
         args = [
             *self.command,
@@ -108,12 +115,38 @@ class ClaudeCodeClient:
             "num_turns": data.get("num_turns"),
             "permission_denials": data.get("permission_denials") or [],
         }
-        self._cache_put(key, reply)
+        if self._is_cacheable(reply):
+            self._cache_put(key, reply)
+            resolved_model = reply.get("model")
+            if resolved_model and resolved_model != self._effective_model():
+                resolved_key = self._key(
+                    prompt, system_prompt, json_schema, model=str(resolved_model)
+                )
+                self._cache_put(resolved_key, reply)
         return {**reply, "cached": False}
 
-    def _key(self, prompt: str, system_prompt: str, json_schema: Dict) -> str:
+    def _expects_tool_use(self) -> bool:
+        return bool(self.mcp_config)
+
+    def _is_cacheable(self, reply: Dict) -> bool:
+        if self._expects_tool_use() and (reply.get("num_turns") or 0) <= 2:
+            return False
+        return True
+
+    def _effective_model(self, model: Optional[str] = None) -> str:
+        chosen = model if model is not None else self.model
+        env_var = MODEL_ALIAS_ENV_VARS.get(chosen)
+        if env_var:
+            override = os.environ.get(env_var, "").strip()
+            if override:
+                return override
+        return chosen
+
+    def _key(
+        self, prompt: str, system_prompt: str, json_schema: Dict, model: Optional[str] = None
+    ) -> str:
         parts = [
-            self.model,
+            self._effective_model(model),
             system_prompt,
             prompt,
             json_schema,

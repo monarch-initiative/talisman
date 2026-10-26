@@ -26,12 +26,25 @@ from oaklib.datamodels.vocabulary import IS_A, PART_OF
 
 from talisman.amigo3_client import Amigo3Client, Amigo3Error
 from talisman.claude_code import ClaudeCodeClient, ClaudeCodeError
-from talisman.engines.amigo3_summarizer import summarize_with_amigo3
+from talisman.engines.amigo3_summarizer import parse_aspects, summarize_with_amigo3
 from talisman.utils.gene_set_utils import GeneSet
 
 logger = logging.getLogger(__name__)
 
 SOURCES = ["claude", "go_top", "shown", "go_all", "mgsa_all"]
+
+
+def expected_term_aspect(entry: Dict) -> str:
+    """Infer the GO aspect ('P', 'F' or 'C') of a curated expected_go entry."""
+    explicit = str(entry.get("aspect") or "").strip().upper()
+    if explicit in ("P", "F", "C"):
+        return explicit
+    category = str(entry.get("category") or "").lower()
+    if "component" in category:
+        return "C"
+    if "function" in category:
+        return "F"
+    return "P"
 
 
 def score(expected: List[str], predicted: List[str], ancestors) -> Dict:
@@ -101,6 +114,9 @@ def run_benchmark(
     if ancestors is None:
         ancestors = go_ancestors()
 
+    tested_aspects = parse_aspects(
+        summarize_options.get("aspect") or (summarize_options.get("parameters") or {}).get("aspect")
+    )
     examples = amigo3.example_genesets(species)
     if identifiers:
         unknown = sorted(set(identifiers) - {e["id"] for e in examples})
@@ -126,26 +142,43 @@ def run_benchmark(
             logger.error(f"{example['id']} failed: {e}")
             failed.append({"id": example["id"], "error": str(e)})
             continue
-        expected = [e["id"] for e in example.get("expected_go", [])]
+        raw_expected = example.get("expected_go", [])
+        expected = [e["id"] for e in raw_expected if expected_term_aspect(e) in tested_aspects]
+        untested_aspect_expected = [
+            e["id"] for e in raw_expected if expected_term_aspect(e) not in tested_aspects
+        ]
         predictions = _predictions(summary)
-        rows.append(
-            {
-                "id": example["id"],
-                "genes": len(mapped["genes"]),
-                "unmapped": mapped.get("unmapped", 0),
-                "expected": expected,
-                "scores": {s: score(expected, predictions[s], ancestors) for s in SOURCES},
-                "ungrounded_ids": summary.ungrounded_ids,
-                "nonsignificant_ids": summary.nonsignificant_ids,
-                "cost_usd": summary.cost_usd,
-                "cached": summary.cached,
-                "summary": summary.summary,
-            }
-        )
+        row = {
+            "id": example["id"],
+            "genes": len(mapped["genes"]),
+            "unmapped": mapped.get("unmapped", 0),
+            "expected": expected,
+            "untested_aspect_expected": untested_aspect_expected,
+            "scores": {s: score(expected, predictions[s], ancestors) for s in SOURCES},
+            "ungrounded_ids": summary.ungrounded_ids,
+            "nonsignificant_ids": summary.nonsignificant_ids,
+            "misattributed_ids": summary.misattributed_ids,
+            "cost_usd": summary.cost_usd,
+            "cached": summary.cached,
+            "summary": summary.summary,
+        }
+        rows.append(row)
+    scored_rows = [r for r in rows if r["expected"]]
     means = {
         s: {
-            k: sum(r["scores"][s][k] for r in rows) / len(rows) if rows else 0.0
-            for k in ("exact", "specific", "predicted")
+            "exact": (
+                sum(r["scores"][s]["exact"] for r in scored_rows) / len(scored_rows)
+                if scored_rows
+                else 0.0
+            ),
+            "specific": (
+                sum(r["scores"][s]["specific"] for r in scored_rows) / len(scored_rows)
+                if scored_rows
+                else 0.0
+            ),
+            "predicted": (
+                sum(r["scores"][s]["predicted"] for r in rows) / len(rows) if rows else 0.0
+            ),
         }
         for s in SOURCES
     }
@@ -154,6 +187,7 @@ def run_benchmark(
         "model": claude.model,
         "agent": bool(summarize_options.get("amigo3_dir")),
         "methods": methods,
+        "aspects": tested_aspects,
         "sets": len(rows),
         "failed": failed,
         "mean": means,

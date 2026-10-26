@@ -16,12 +16,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Tests and checks
 
 - CI (`.github/workflows/qc.yml`, Python 3.9–3.11) runs `tox -e lint`, `tox -e flake8`,
-  `tox -e mypy`, then `python -m unittest discover tests.unit`. `tox -e lint` rewrites files instead
-  of checking them, so CI never fails on formatting (#28). `/ci-check` runs the same checks with
-  formatting checked, so it is stricter than CI.
+  `tox -e mypy`, `uv build` + `uvx twine check dist/*`, then `python -m unittest discover tests.unit`.
+  `tox -e lint` checks formatting with `black --check --diff` and `isort --check-only --diff`;
+  `tox -e format` rewrites files in place. `/ci-check` runs the same checks locally.
 - Only `tests/unit` runs; `tox -e py` runs it with pytest. Bare `pytest` and `tests/integration`
-  fail at import (they target ontogpt modules that don't exist here), and so does
-  `import talisman.evaluation`.
+  fail at import (they target ontogpt modules that don't exist here).
 - One test: `uv run python -m unittest tests.unit.test_unit_cli.TestCommandLineInterface.test_main_help`.
   `test_populate` calls the live Alliance API.
 - A PostToolUse hook (`.claude/hooks/format-python.sh`) runs black and isort from `.venv` on each
@@ -36,9 +35,10 @@ Most of talisman was copied from ontogpt 0.3.6, and much of it still calls ontog
 - `talisman enrichment` uses ontogpt's default prompt (`DEFAULT_ENRICHMENT_PROMPT`). Editing
   `src/talisman/prompts/enrichment/*.jinja2` changes nothing unless the file is passed with
   `--prompt-template`.
-- `eval` runs ontogpt's evaluators, and the streamlit app runs ontogpt's engine. `eval-enrichment`
-  and `create-gene-set` always crash, because ontogpt 0.3.6's `EvalEnrichment` fails while it is
-  constructed (#49).
+- `eval` resolves ontogpt's evaluators plus `eval_enrichment`, and the streamlit app runs ontogpt's
+  engine. `eval-enrichment` and `create-gene-set` use
+  `talisman.evaluation.enrichment.eval_enrichment.EvalEnrichment`, which subclasses ontogpt 0.3.6's
+  `EvalEnrichment` to fix its constructor, model lookup, and annotation loader bugs (#49).
 - The README's `ontogpt enrichment` example runs ontogpt's code, not talisman's.
 - Most Makefile targets, the `src/ontogpt/templates` exclude in `tox.ini` and `.cruft.json` are
   ontogpt leftovers. Don't run `cruft update`.

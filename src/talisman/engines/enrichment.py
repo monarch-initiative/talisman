@@ -11,11 +11,11 @@ from typing import Dict, List, Optional, Tuple, Union
 from jinja2 import Template
 from oaklib import BasicOntologyInterface, get_adapter
 from ontogpt import MODELS
+from ontogpt.engines.enrichment import EnrichmentPayload as OntoGPTEnrichmentPayload
 from ontogpt.engines.knowledge_engine import KnowledgeEngine
 from ontogpt.prompts.enrichment import DEFAULT_ENRICHMENT_PROMPT
 from ontogpt.templates.class_enrichment import ClassEnrichmentResult
 from ontogpt.templates.gene_description_term import GeneDescriptionTerm
-from pydantic import BaseModel
 
 from talisman.utils.gene_set_utils import (
     ENTITY_ID,
@@ -45,7 +45,7 @@ class GeneDescriptionSource(Enum):
     PUBMED = "pubmed"
 
 
-class EnrichmentPayload(BaseModel):
+class EnrichmentPayload(OntoGPTEnrichmentPayload):
     """Payload for enrichment."""
 
     prompt: str = ""

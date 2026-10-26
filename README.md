@@ -96,24 +96,29 @@ talisman amigo3-summarize -U tests/input/genesets/HALLMARK_GLYCOLYSIS.yaml -o gl
 talisman amigo3-summarize --agent --amigo3-dir ../amigo3-prototype -m opus HK1 PFKM PKM ENO1
 ```
 
-Useful options: `--methods` (default `go,mgsa,gocam,neighborhood`), `--aspect P|F|C`,
-`--evidence all|no_iea|experimental|iba`, `--species` (an AmiGO 3 species key; default the
-gene set's taxon), `--gene-descriptions` (also give Claude the gene descriptions from the
-`enrichment` command), `--max-budget-usd` and `--show-prompt`.
+Useful options: `--methods` (default `go,mgsa,gocam,neighborhood`), `--aspect P|F|C|all` (or
+comma-separated, e.g. `P,C`), `--max-terms` (default 50, balancing top p-values, MGSA support
+and study-gene coverage), `--evidence all|no_iea|experimental|iba`, `--species` (an AmiGO 3
+species key; default the gene set's taxon), `--gene-descriptions` (also give Claude the gene
+descriptions from the `enrichment` command), `--max-budget-usd` and `--show-prompt`.
 
 Output is YAML. Besides the summary, mechanism, themes and caveats it records the genes
 AmiGO 3 could not use (`unresolved_genes`, `ambiguous_genes`, `untested_genes`), the rows
 each method showed the model (`enrichment`), every significant set (`significant_ids`), and
-two grounding checks: `ungrounded_ids` (cited, but in no table) and `nonsignificant_ids`
-(cited, but only from a row listed as context).
+three grounding checks: `ungrounded_ids` (cited, but in no table), `nonsignificant_ids`
+(cited, but only from a row listed as context) and `misattributed_ids` (cited in a theme
+whose listed `methods` do not match the tables containing the ID).
 
 Replies are cached in `.talisman_claude_cache.db` in the current directory (or the
-`talisman --cache-db` path), keyed by model name, prompt and tools; pass `--no-cache` for a
-fresh answer. An alias such as `sonnet` keeps its cached replies after it moves to a newer
-model, so pass a full model name when that matters.
+`talisman --cache-db` path), keyed by model name (incorporating `ANTHROPIC_DEFAULT_*_MODEL`
+overrides and also indexed under the resolved model ID reported by Claude), prompt and tools;
+pass `--no-cache` for a fresh answer. Agent-mode runs that complete without tool queries
+(`num_turns <= 2`) are not cached. An alias such as `sonnet` keeps its cached replies after it
+moves to a newer model, so pass a full model name when that matters.
 
 `talisman amigo3-benchmark` runs AmiGO 3's bundled example gene sets (11 human sets), each
-with curated expected GO terms, and reports the recall of those terms by:
+with curated expected GO terms, and reports the recall of those terms (filtered to the tested
+`--aspect`, or across all aspects with `--aspect all`) by:
 
 * `claude`: the GO IDs Claude cites from significant table rows
 * `go_top`: the same number of top hypergeometric GO terms, for a like-for-like comparison
