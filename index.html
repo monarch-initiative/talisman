@@ -333,6 +333,15 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#tabular-go-enrichment-and-summarization-tabular-enrichment-and-tabular-summarize" class="md-nav__link">
+    <span class="md-ellipsis">
+      Tabular GO Enrichment and Summarization (tabular-enrichment and tabular-summarize)
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -527,6 +536,15 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#tabular-go-enrichment-and-summarization-tabular-enrichment-and-tabular-summarize" class="md-nav__link">
+    <span class="md-ellipsis">
+      Tabular GO Enrichment and Summarization (tabular-enrichment and tabular-summarize)
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -607,10 +625,10 @@ locked lxml 5.0.0 has no wheels for Python 3.9 or 3.10. The lock supports Python
 <li><code>--prompt-template TEXT</code> - Path to a file containing the prompt.</li>
 <li><code>--interactive</code> / <code>--no-interactive</code> - Interactive mode - rather than call the API, the function will present a walkthrough process. Defaults to False.</li>
 </ul>
-<p>Example:</p>
-<pre><code class="language-bash">ontogpt enrichment -r sqlite:obo:hgnc -U tests/input/genesets/EDS.yaml
+<p>Example (requires an OpenAI API key via <code>export OPENAI_API_KEY=...</code> or <code>uv run runoak set-apikey -e openai &lt;key&gt;</code>):</p>
+<pre><code class="language-bash">uv run talisman enrichment -r sqlite:obo:hgnc -U tests/input/genesets/EDS.yaml -o eds.yaml
 </code></pre>
-<p>In this case, the prompt will include gene summaries retrieved from the database.</p>
+<p>In this case, the prompt will include gene summaries retrieved from the Alliance of Genome Resources database. To summarize a list of pre-selected ontology term names directly without gene description lookup, set <code>lacks_descriptions: true</code> in the input YAML (see <code>tests/input/genesets/microbiome.yaml</code>).</p>
 <p>The response text will include, among other fields, a summary like this:</p>
 <pre><code class="language-text">Summary: The common function among these genes is their involvement in the regulation and organization of the extracellular matrix, particularly collagen fibril organization and biosynthesis.
 </code></pre>
@@ -659,16 +677,22 @@ and every cited gene against the input (<code>unknown_genes</code>). With <code>
 query the AmiGO 3 database read-only while it writes, through the same tools as AmiGO 3's chat.</p>
 <p>Requirements:</p>
 <ul>
-<li>A running AmiGO 3 server. Build one with <code>uv run amigo3 fetch</code> and
-  <code>uv run amigo3 build --repository /path/to/ai-gene-review</code>, then
-  <code>uv run amigo3 serve --backend duckdb</code> (no Solr needed). Without <code>--repository</code>, only
-  <code>go</code> and <code>mgsa</code> work; the others are reported in <code>skipped_methods</code>.</li>
-<li><a href="https://claude.com/claude-code">Claude Code</a>, signed in. TALISMAN runs <code>claude -p</code>, so calls
+<li>A running AmiGO 3 server (default <code>http://127.0.0.1:8030</code>, or pass <code>--amigo3-url</code>). To build and run one locally (requires <code>uv</code> and a Rust toolchain for <code>genesets</code>/MGSA):
+  <code>bash
+  git clone https://github.com/geneontology/amigo3-prototype.git
+  git clone https://github.com/geneontology/ai-gene-review.git
+  cd amigo3-prototype
+  uv sync
+  uv run amigo3 fetch
+  uv run amigo3 build --repository ../ai-gene-review
+  uv run amigo3 serve --backend duckdb --genesets-url ''</code>
+  (No Solr or Docker needed. Without <code>--repository</code>, only <code>go</code> and <code>mgsa</code> work; the others are reported in <code>skipped_methods</code>.)</li>
+<li><a href="https://claude.com/claude-code">Claude Code</a>, signed in (<code>claude auth status</code>). TALISMAN runs <code>claude -p</code>, so calls
   are billed to that sign-in; set <code>CLAUDE_CONFIG_DIR</code> to choose between accounts. No API key
   is needed.</li>
 </ul>
-<pre><code class="language-bash">talisman amigo3-summarize -U tests/input/genesets/HALLMARK_GLYCOLYSIS.yaml -o glycolysis.yaml
-talisman amigo3-summarize --agent --amigo3-dir ../amigo3-prototype -m opus HK1 PFKM PKM ENO1
+<pre><code class="language-bash">uv run talisman amigo3-summarize -U tests/input/genesets/HALLMARK_GLYCOLYSIS.yaml --max-budget-usd 0.50 -o /tmp/glycolysis.yaml
+uv run talisman amigo3-summarize --agent --amigo3-dir ../amigo3-prototype --max-budget-usd 0.50 -m sonnet HK1 PFKM PKM ENO1
 </code></pre>
 <p>Useful options: <code>--methods</code> (default <code>go,mgsa,gocam,neighborhood</code>), <code>--aspect P|F|C|all</code> (or
 comma-separated, e.g. <code>P,C</code>), <code>--max-terms</code> (default 50, balancing top p-values, MGSA support
@@ -698,6 +722,15 @@ with curated expected GO terms, and reports the recall of those terms (filtered 
   MGSA-active term</li>
 </ul>
 <p>It runs one set by default; pass <code>--limit 0</code> for all of them, or <code>--set-id</code> to pick sets.</p>
+<h3 id="tabular-go-enrichment-and-summarization-tabular-enrichment-and-tabular-summarize">Tabular GO Enrichment and Summarization (<code>tabular-enrichment</code> and <code>tabular-summarize</code>)</h3>
+<p>For organisms not in AmiGO 3 or custom correlation/expression workbooks (<code>.xlsx</code>, <code>.tsv</code>, or <code>.csv</code> with a <code>genes incldg GO</code> table containing <code>gene_id</code>, <code>go_id</code>, <code>go_ontology</code>, <code>go_term</code>, <code>Significant?</code>, <code>pos/neg corr</code>, <code>r (Pearson)</code>, <code>FPKM average (samples)</code>, and <code>hypothetical protein?</code>), TALISMAN provides built-in statistical enrichment and grounded Claude summarization:</p>
+<pre><code class="language-bash"># 1. Run one-sided hypergeometric over-representation and two-sided Mann-Whitney U rank tests
+uv run talisman tabular-enrichment workbook.xlsx results/
+
+# 2. Summarize significant (FDR &lt;= 0.05) and suggestive (FDR &lt;= 0.25) terms with Claude Code
+uv run talisman tabular-summarize results/ both --context-file experiment_context.txt
+</code></pre>
+<p><code>tabular-enrichment</code> writes <code>enrichment_pos.tsv</code>, <code>enrichment_neg.tsv</code>, <code>rank_test.tsv</code>, and <code>enrichment_summary.json</code> to <code>results/</code> (collapsing redundant significant terms that share identical gene sets to the most specific representative term). <code>tabular-summarize</code> writes <code>summary_up.md</code>, <code>summary_up.json</code>, <code>summary_down.md</code>, and <code>summary_down.json</code>, auditing every cited GO ID against the tables (<code>ungrounded_ids</code> and <code>theme_ids_not_significant</code>) and caching Claude replies in <code>results/.claude_cache.db</code> (or <code>--cache-db</code>). Useful options include <code>--condition</code>, <code>--significant-cutoff</code>, <code>--suggestive-cutoff</code>, <code>--system-prompt-file</code>, <code>--max-budget-usd</code>, and <code>--dry-run</code>.</p>
 <h2 id="citation">Citation</h2>
 <p>The gene summarization approach used in TALISMAN is described further in: Joachimiak MP, Caufield JH, Harris NL, Kim H, Mungall CJ. Gene Set Summarization using Large Language Models. arXiv publication: <a href="http://arxiv.org/abs/2305.13338">http://arxiv.org/abs/2305.13338</a></p>
 <h2 id="acknowledgements">Acknowledgements</h2>
