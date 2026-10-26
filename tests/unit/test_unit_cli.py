@@ -10,7 +10,7 @@ from click.testing import CliRunner
 from oaklib.interfaces.obograph_interface import OboGraphInterface
 
 from talisman.cli import main
-from talisman.engines.enrichment import EnrichmentPayload
+from talisman.engines.enrichment import EnrichmentEngine, EnrichmentPayload
 from talisman.evaluation.enrichment.eval_enrichment import (
     DATABASE_DIR,
     ENRICHMENT_MODELS,
@@ -145,3 +145,34 @@ class TestCommandLineInterface(unittest.TestCase):
         fake_eval.load_annotations.assert_called_once_with("tests/input/genes2go.tsv.gz")
         fake_eval.create_gene_set_from_term.assert_called_once_with("GO:0005777")
         self.assertIn("PEX1", result.stdout)
+
+    def test_enrichment_cli_output_file_and_skip_annotator(self):
+        """Test that enrichment -o writes to a file and forwards --skip-annotator."""
+        fake_ke = mock.MagicMock(spec=EnrichmentEngine)
+        fake_ke.client = mock.MagicMock()
+        fake_ke.summarize.return_value = EnrichmentPayload(
+            summary="peroxisome summary",
+            term_strings=["peroxisome"],
+            term_ids=["GO:0005777"],
+            truncation_factor=1.0,
+        )
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch("talisman.cli.create_engine", return_value=fake_ke),
+        ):
+            out_path = Path(tmp) / "eds.yaml"
+            result = self.runner.invoke(
+                main,
+                [
+                    "--skip-annotator",
+                    "sqlite:obo:go",
+                    "enrichment",
+                    "-U",
+                    "tests/input/genesets/EDS.yaml",
+                    "-o",
+                    str(out_path),
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(fake_ke.skip_annotators, ["sqlite:obo:go"])
+            self.assertIn("peroxisome summary", out_path.read_text(encoding="utf-8"))

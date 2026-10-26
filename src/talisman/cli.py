@@ -64,7 +64,7 @@ settings = Settings()
 
 
 def _as_text_writer(f):
-    if isinstance(f, TextIOWrapper):
+    if isinstance(f, TextIOWrapper) or "b" not in getattr(f, "mode", "b"):
         return f
     else:
         return codecs.getwriter("utf-8")(f)
@@ -374,6 +374,8 @@ def enrichment(
         ke.client.interactive = True
     if settings.cache_db:
         ke.client.cache_db_path = settings.cache_db
+    if settings.skip_annotators:
+        ke.skip_annotators = settings.skip_annotators
     if not isinstance(ke, EnrichmentEngine):
         raise ValueError(f"Expected EnrichmentEngine, got {type(ke)}")
     if resolver:
