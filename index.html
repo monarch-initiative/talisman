@@ -721,7 +721,64 @@ with curated expected GO terms, and reports the recall of those terms (filtered 
 <li><code>go_all</code> and <code>mgsa_all</code>: every significant hypergeometric term (often hundreds) and every
   MGSA-active term</li>
 </ul>
-<p>It runs one set by default; pass <code>--limit 0</code> for all of them, or <code>--set-id</code> to pick sets.</p>
+<p>It runs one set by default; pass <code>--limit 0</code> for all of them, or <code>--set-id</code> to pick sets. On
+AmiGO 3 build <code>77fbebffd9d35f96</code> across all 11 human example gene sets, the enrichment and
+table-selection baselines recover:</p>
+<table>
+<thead>
+<tr>
+<th>aspect</th>
+<th>source</th>
+<th style="text-align: right;">mean terms</th>
+<th style="text-align: right;">exact recall</th>
+<th style="text-align: right;">specific recall (+ descendants)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>P</code> (60 BP expected terms)</td>
+<td><code>shown</code> (<code>--max-terms 50</code>)</td>
+<td style="text-align: right;">45.5</td>
+<td style="text-align: right;">28.5%</td>
+<td style="text-align: right;">40.0%</td>
+</tr>
+<tr>
+<td><code>P</code> (60 BP expected terms)</td>
+<td><code>go_all</code></td>
+<td style="text-align: right;">534.1</td>
+<td style="text-align: right;">62.4%</td>
+<td style="text-align: right;">67.3%</td>
+</tr>
+<tr>
+<td><code>P</code> (60 BP expected terms)</td>
+<td><code>mgsa_all</code></td>
+<td style="text-align: right;">12.1</td>
+<td style="text-align: right;">4.8%</td>
+<td style="text-align: right;">18.5%</td>
+</tr>
+<tr>
+<td><code>all</code> (71 <code>P,F,C</code> expected terms)</td>
+<td><code>shown</code> (<code>--max-terms 50</code>)</td>
+<td style="text-align: right;">67.0</td>
+<td style="text-align: right;">25.5%</td>
+<td style="text-align: right;">35.1%</td>
+</tr>
+<tr>
+<td><code>all</code> (71 <code>P,F,C</code> expected terms)</td>
+<td><code>go_all</code></td>
+<td style="text-align: right;">682.9</td>
+<td style="text-align: right;">63.9%</td>
+<td style="text-align: right;">69.3%</td>
+</tr>
+<tr>
+<td><code>all</code> (71 <code>P,F,C</code> expected terms)</td>
+<td><code>mgsa_all</code></td>
+<td style="text-align: right;">67.1</td>
+<td style="text-align: right;">5.6%</td>
+<td style="text-align: right;">23.6%</td>
+</tr>
+</tbody>
+</table>
 <h3 id="tabular-go-enrichment-and-summarization-tabular-enrichment-and-tabular-summarize">Tabular GO Enrichment and Summarization (<code>tabular-enrichment</code> and <code>tabular-summarize</code>)</h3>
 <p>For organisms not in AmiGO 3 or custom correlation/expression workbooks (<code>.xlsx</code>, <code>.tsv</code>, or <code>.csv</code> with a <code>genes incldg GO</code> table containing <code>gene_id</code>, <code>go_id</code>, <code>go_ontology</code>, <code>go_term</code>, <code>Significant?</code>, <code>pos/neg corr</code>, <code>r (Pearson)</code>, <code>FPKM average (samples)</code>, and <code>hypothetical protein?</code>), TALISMAN provides built-in statistical enrichment and grounded Claude summarization:</p>
 <pre><code class="language-bash"># 1. Run one-sided hypergeometric over-representation and two-sided Mann-Whitney U rank tests
