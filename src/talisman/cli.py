@@ -13,7 +13,7 @@ from typing import List, Optional, Union
 
 import click
 import yaml
-from ontogpt import DEFAULT_MODEL, DEFAULT_MODEL_DETAILS, MODELS, __version__
+from ontogpt import DEFAULT_MODEL, DEFAULT_MODEL_DETAILS, MODELS
 from ontogpt.engines import create_engine
 from ontogpt.engines.knowledge_engine import KnowledgeEngine
 from ontogpt.evaluation.enrichment import eval_enrichment as ontogpt_eval_enrichment
@@ -25,6 +25,7 @@ from ontogpt.io.rdf_exporter import RDFExporter
 from ontogpt.io.yaml_wrapper import dump_minimal_yaml
 from ontogpt.templates.core import ExtractionResult
 
+from talisman import __version__
 from talisman.amigo3_benchmark import run_benchmark
 from talisman.amigo3_client import DEFAULT_AMIGO3_URL, DEFAULT_METHODS, METHODS, Amigo3Client
 from talisman.claude_code import DEFAULT_CACHE_DB, DEFAULT_CLAUDE_MODEL, ClaudeCodeClient

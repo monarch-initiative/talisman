@@ -35,6 +35,11 @@ class TestCommandLineInterface(unittest.TestCase):
         self.assertIn("enrichment", out)
         self.assertEqual(0, result.exit_code)
 
+    def test_version(self):
+        result = self.runner.invoke(main, ["--version"])
+        self.assertEqual(0, result.exit_code)
+        self.assertIn("0.1.0", result.stdout)
+
     def test_eval_enrichment_drops_genes(self):
         """Test that eval-enrichment's evaluator can drop genes on Python 3.11+ (#25)."""
         # Skip EvalEnrichment.__init__, which loads models and resolvers.

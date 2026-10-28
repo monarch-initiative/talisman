@@ -133,7 +133,18 @@ with curated expected GO terms, and reports the recall of those terms (filtered 
 * `go_all` and `mgsa_all`: every significant hypergeometric term (often hundreds) and every
   MGSA-active term
 
-It runs one set by default; pass `--limit 0` for all of them, or `--set-id` to pick sets.
+It runs one set by default; pass `--limit 0` for all of them, or `--set-id` to pick sets. On
+AmiGO 3 build `77fbebffd9d35f96` across all 11 human example gene sets, the enrichment and
+table-selection baselines recover:
+
+| aspect | source | mean terms | exact recall | specific recall (+ descendants) |
+|---|---|---:|---:|---:|
+| `P` (60 BP expected terms) | `shown` (`--max-terms 50`) | 45.5 | 28.5% | 40.0% |
+| `P` (60 BP expected terms) | `go_all` | 534.1 | 62.4% | 67.3% |
+| `P` (60 BP expected terms) | `mgsa_all` | 12.1 | 4.8% | 18.5% |
+| `all` (71 `P,F,C` expected terms) | `shown` (`--max-terms 50`) | 67.0 | 25.5% | 35.1% |
+| `all` (71 `P,F,C` expected terms) | `go_all` | 682.9 | 63.9% | 69.3% |
+| `all` (71 `P,F,C` expected terms) | `mgsa_all` | 67.1 | 5.6% | 23.6% |
 
 ### Tabular GO Enrichment and Summarization (`tabular-enrichment` and `tabular-summarize`)
 

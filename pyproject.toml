@@ -1,6 +1,6 @@
 [project]
 name = "talisman"
-version = "0.0.1"
+version = "0.1.0"
 description = "TALISMAN"
 authors = [{ name = "Marcin Joachimiak" }]
 license = "BSD-3-Clause"

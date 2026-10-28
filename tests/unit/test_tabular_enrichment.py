@@ -11,6 +11,7 @@ from openpyxl import Workbook
 
 from talisman.cli import main
 from talisman.tabular_enrichment import (
+    DEFAULT_SYSTEM_PROMPT,
     SHEET,
     bh,
     build_prompt,
@@ -314,3 +315,8 @@ class TestTabularEnrichment(unittest.TestCase):
                 self.assertTrue((outdir / "summary_down.json").exists())
                 self.assertTrue((outdir / "summary_up.md").exists())
                 self.assertTrue((outdir / "summary_down.md").exists())
+
+    def test_default_system_prompt_organelle_guidance(self):
+        self.assertIn("non-membrane-bounded organelle", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("ribosome", DEFAULT_SYSTEM_PROMPT)
+        self.assertIn("prokaryotes", DEFAULT_SYSTEM_PROMPT)

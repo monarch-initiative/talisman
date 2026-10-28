@@ -102,7 +102,10 @@ evidence and cite their GO IDs. Themes must rest on terms from the "Significant"
 the "Suggestive" table may appear only in hypotheses, labelled as tentative. You may use background
 biological knowledge to interpret the results, but say when a statement is interpretation rather
 than a result. Gene names are not provided: do not name genes or operons as if they were measured.
-Note when listed terms are parents of one another rather than independent findings, and keep claims
+Note when listed terms are parents of one another rather than independent findings (for example, in
+the Gene Ontology, ribosome and bacterial-type flagellum are classified under
+non-membrane-bounded organelle, so organelle and intracellular organelle terms in prokaryotes are
+normal GO ancestor roll-ups rather than eukaryotic annotation artifacts), and keep claims
 proportional to effect sizes and FDRs."""
 
 SCHEMA: Dict[str, Any] = {
